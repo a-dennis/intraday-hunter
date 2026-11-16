@@ -133,12 +133,26 @@ def add_ind(d):
     return d
 
 
-def analyze(sym, d, look, plan):
+def data_ok(t, interval):
+    step = 5 if interval == "5m" else 15
+    start = t.index[0].replace(hour=9, minute=15, second=0, microsecond=0)
+    if (t.index[0] - start).total_seconds() / 60 > step:
+        return False, "opening 9:15 candle missing, so VWAP would be wrong"
+    elapsed = (t.index[-1] - start).total_seconds() / 60 / step + 1
+    if len(t) < 0.85 * elapsed:
+        return False, "gaps in today's candles"
+    return True, ""
+
+
+def analyze(sym, d, look, plan, interval):
     d = add_ind(d)
     ld = d.index[-1].date()
     t = d[d.index.date == ld]
     if len(t) < 4 or t.VWAP.isna().all():
         return None
+    ok, why = data_ok(t, interval)
+    if not ok:
+        return {"Symbol": sym, "_skip": why}
     prev = d[d.index.date < ld]
     pc = prev.Close.iloc[-1] if len(prev) else np.nan
     side = np.sign((t.Close - t.VWAP).values)
@@ -179,7 +193,7 @@ def analyze(sym, d, look, plan):
         "Symbol": sym, "Direction": dirn, "LTP": round(ltp, 2),
         "Chg %": round((ltp / pc - 1) * 100, 2) if pc == pc else np.nan,
         "VWAP": round(vw, 2), "Gap to VWAP %": round((ltp / vw - 1) * 100, 2),
-        "Crossed at": t.index[j].strftime("%H:%M"), "Candles ago": n - 1 - j,
+        "Crossed at": t.index[j].strftime("%H:%M"), "_candles": n, "Candles ago": n - 1 - j,
         "Vol x": round(vr, 2) if vr == vr else np.nan, "RSI": round(float(rsi), 1),
         "Score /5": score, "Turnover Cr": round(turnover, 1),
         "Entry": round(ltp, 2), "Stop": round(stop, 2), "Target": round(target, 2), "Qty": qty,
@@ -288,6 +302,7 @@ with st.sidebar:
     wl = st.text_area("Stocks to scan (NSE symbols, comma separated)", DEFAULT_LIST, height=140)
     interval = st.selectbox("Candle size", ["5m", "15m"], index=0)
     look = st.slider("'Just crossed' means within last N candles", 1, 6, 3)
+    maxgap = st.slider("Maximum distance from VWAP (%)", 0.1, 2.0, 0.5, 0.1)
     min_score = st.slider("Minimum score (out of 5)", 0, 5, 2)
     min_turn = st.number_input("Minimum turnover today (Rs crore)", 0.0, 500.0, 5.0, 1.0)
     st.subheader("Paper trading")
@@ -319,13 +334,15 @@ with st.spinner("Getting prices..."):
         data = {}
         st.error(f"Could not get prices: {e}")
 
-rows = []
+rows, skipped = [], []
 for s, d in data.items():
     try:
-        r = analyze(s, d, look, plan)
+        r = analyze(s, d, look, plan, interval)
     except Exception:
         r = None
-    if r:
+    if r and "_skip" in r:
+        skipped.append((r["Symbol"], r["_skip"]))
+    elif r:
         rows.append(r)
 scan = pd.DataFrame(rows)
 last_candle = max((d.index[-1] for d in data.values()), default=None)
@@ -351,7 +368,8 @@ tab1, tab2, tab3, tab4 = st.tabs(["🔍 VWAP cross scanner", "📈 Chart", "📒
 SHOW = ["Symbol", "LTP", "Chg %", "VWAP", "Gap to VWAP %", "Crossed at", "Candles ago", "Vol x", "RSI",
         "Score /5", "Entry", "Stop", "Target", "Qty"]
 if len(scan):
-    scan = scan[(scan["Score /5"] >= min_score) & (scan["Turnover Cr"] >= min_turn)]
+    scan = scan[(scan["Score /5"] >= min_score) & (scan["Turnover Cr"] >= min_turn)
+                & (scan["Gap to VWAP %"].abs() <= maxgap)]
 
 # ---------------------------------------------------------------- scanner
 with tab1:
@@ -383,6 +401,9 @@ with tab1:
             else:
                 add_trade(rr_, setup, note)
                 st.success(f"Logged {sym} ({rr_['Direction']}) at {rr_['Entry']}. See the Paper trades tab.")
+        if skipped:
+            with st.expander(f"{len(skipped)} stock(s) skipped because Yahoo data is incomplete"):
+                st.write(", ".join(f"{a} ({b})" for a, b in skipped))
         st.caption("Stop is just beyond VWAP. Qty keeps the loss near your risk amount if the stop is hit. This is for practice only.")
 
 # ---------------------------------------------------------------- chart
@@ -407,6 +428,21 @@ with tab2:
         fig.update_layout(height=560, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10),
                           xaxis=dict(rangebreaks=[dict(bounds=["sat", "mon"]), dict(bounds=[15.5, 9.25], pattern="hour")]))
         st.plotly_chart(fig, width="stretch")
+        tt = d[d.index.date == d.index[-1].date()]
+        st.markdown("##### Check the VWAP against your broker")
+        k = st.columns(4)
+        k[0].metric("App VWAP", f"{tt.VWAP.iloc[-1]:.2f}")
+        k[1].metric("Last price", f"{tt.Close.iloc[-1]:.2f}")
+        k[2].metric("Candles today", len(tt))
+        k[3].metric("First candle", tt.index[0].strftime("%H:%M"))
+        bv = st.number_input("Your broker's VWAP for this stock (optional)", 0.0, 1000000.0, 0.0, 0.05)
+        if bv > 0:
+            diff = (tt.VWAP.iloc[-1] / bv - 1) * 100
+            if abs(diff) > 0.15:
+                st.warning(f"The app VWAP is {diff:+.2f}% away from your broker's. Yahoo volumes differ from the exchange, "
+                           "so treat the broker's VWAP as the reference and use this list only as a first filter.")
+            else:
+                st.success(f"The app VWAP is within {abs(diff):.2f}% of your broker's.")
 
 # ---------------------------------------------------------------- journal
 with tab3:
@@ -491,6 +527,8 @@ quantity so that the loss at the stop is about your risk amount. Costs are estim
 **Rules to keep in mind**
 - Paper trade for at least 3-4 weeks and read the journal before using real money.
 - Intraday cash trades must be squared off the same day. The app closes open paper trades at about 3:15 pm.
+- Stocks with missing opening candles or gaps are skipped, because their VWAP would be wrong.
+- Yahoo volumes are not the exchange volumes, so VWAP can differ a little from your broker's. Check it in the Chart tab.
 - Yahoo data can be delayed or have gaps. Always compare with your broker screen.
 - This is a practice and learning tool, not investment advice.
 """)
