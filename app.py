@@ -10,8 +10,8 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 JOURNAL = "journal.csv"
-COLS = ["id", "date", "time", "symbol", "side", "entry", "stop", "target", "qty", "status",
-        "exit", "exit_time", "gross", "costs", "net", "r", "score", "setup", "note"]
+COLS = ["id", "date", "time", "symbol", "side", "entry", "stop", "target", "qty", "status", "exit", "exit_time",
+        "gross", "costs", "net", "r", "relvol", "rank", "setup", "note"]
 DEFAULT_LIST = ("RELIANCE, TCS, HDFCBANK, ICICIBANK, INFY, BHARTIARTL, ITC, SBIN, LT, KOTAKBANK, "
                 "HINDUNILVR, AXISBANK, BAJFINANCE, ASIANPAINT, MARUTI, SUNPHARMA, TITAN, ULTRACEMCO, "
                 "NTPC, ONGC, POWERGRID, TATASTEEL, JSWSTEEL, HCLTECH, WIPRO, TECHM, ADANIPORTS, "
@@ -19,22 +19,30 @@ DEFAULT_LIST = ("RELIANCE, TCS, HDFCBANK, ICICIBANK, INFY, BHARTIARTL, ITC, SBIN
                 "HEROMOTOCO, INDUSINDBK, TATACONSUM, APOLLOHOSP, SBILIFE, HDFCLIFE, BRITANNIA, DIVISLAB, "
                 "SHRIRAMFIN, TRENT, BEL, PNB, BANKBARODA, CANBK, IOC, GAIL, VEDL, DLF, HAL, RECLTD, PFC, "
                 "SAIL, NMDC, IDFCFIRSTB, M&M")
+STAGES = ["Quality", "In play", "Trigger", "Momentum", "Trade plan"]
 
 st.set_page_config(page_title="Intraday Hunter", page_icon="🎯", layout="wide")
 st.markdown("""
 <style>
-.block-container{padding-top:3.5rem;max-width:1250px}
-.hero{background:linear-gradient(120deg,#0f2027,#1c3d5a 55%,#2c5364);border-radius:16px;padding:20px 26px;color:#fff;margin-bottom:14px}
-.hero h1{margin:0;font-size:30px;color:#fff}
-.hero p{margin:4px 0 0;color:#cfe3f1;font-size:15px}
-.kpi{border:1px solid rgba(128,128,128,.3);border-radius:14px;padding:12px 16px}
-.kpi b{font-size:26px;display:block}
-.kpi span{font-size:13px;opacity:.75}
-.up{color:#14a44d}.dn{color:#e03131}
-.card{border:1px solid rgba(128,128,128,.3);border-radius:14px;padding:12px 16px;margin-bottom:10px}
-.pill{display:inline-block;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:600;color:#fff}
-.pill.up{background:#14a44d;color:#fff}.pill.dn{background:#e03131;color:#fff}
-.warn{border-left:4px solid #f08c00;background:rgba(240,140,0,.1);padding:10px 14px;border-radius:8px;font-size:14px}
+.block-container{padding-top:3.5rem;max-width:1280px}
+.hero{background:linear-gradient(120deg,#0b1f33,#15405f 55%,#1d6a7a);border-radius:18px;padding:22px 28px;color:#fff;margin-bottom:16px;
+ box-shadow:0 6px 24px rgba(0,0,0,.18)}
+.hero h1{margin:0;font-size:31px;color:#fff;letter-spacing:.3px}
+.hero p{margin:5px 0 0;color:#cfe6f2;font-size:15px}
+.kpi{border:1px solid rgba(128,128,128,.28);border-radius:14px;padding:12px 16px;background:rgba(128,128,128,.05)}
+.kpi b{font-size:25px;display:block;line-height:1.2}.kpi span{font-size:12.5px;opacity:.7;letter-spacing:.3px}
+.pick{border:1px solid rgba(128,128,128,.3);border-radius:16px;padding:14px 16px;margin-bottom:8px;background:rgba(128,128,128,.05)}
+.pick.long{border-top:4px solid #14a44d}.pick.short{border-top:4px solid #e03131}
+.pick h3{margin:0;font-size:21px}.pick .sub{font-size:12.5px;opacity:.7}
+.pill{display:inline-block;border-radius:999px;padding:2px 11px;font-size:12px;font-weight:700;color:#fff;margin-left:6px}
+.pill.long{background:#14a44d}.pill.short{background:#e03131}.pill.rank{background:#495a6e}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}
+.grid div{background:rgba(128,128,128,.08);border-radius:10px;padding:6px 9px;font-size:12px}
+.grid b{display:block;font-size:15px}
+.chips span{display:inline-block;font-size:11.5px;border-radius:8px;padding:2px 7px;margin:2px 3px 0 0;background:rgba(20,164,77,.16);color:inherit}
+.chips span.no{background:rgba(224,49,49,.16)}
+.warn{border-left:4px solid #f08c00;background:rgba(240,140,0,.1);padding:10px 14px;border-radius:8px;font-size:14px;margin:8px 0}
+.note{border-left:4px solid #1c7ed6;background:rgba(28,126,214,.08);padding:10px 14px;border-radius:8px;font-size:14px;margin:8px 0}
 </style>
 """, unsafe_allow_html=True)
 
@@ -77,7 +85,7 @@ def _gate():
 _gate()
 
 
-# ---------------------------------------------------------------- data
+# ============================================================ data
 def now_ist():
     return datetime.now(IST)
 
@@ -104,10 +112,10 @@ def clean(raw, t, many):
         return None
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch(symbols, interval):
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch(symbols):
     tick = [s + ".NS" for s in symbols]
-    raw = yf.download(tick, period="5d", interval=interval, group_by="ticker",
+    raw = yf.download(tick, period="60d", interval="5m", group_by="ticker",
                       auto_adjust=False, progress=False, threads=True)
     out = {}
     for s, t in zip(symbols, tick):
@@ -117,91 +125,258 @@ def fetch(symbols, interval):
     return out
 
 
-def add_ind(d):
+def prep(d):
     d = d.copy()
+    d["date"] = d.index.date
     d["EMA9"] = d.Close.ewm(span=9, adjust=False).mean()
     d["EMA21"] = d.Close.ewm(span=21, adjust=False).mean()
     ch = d.Close.diff()
     up, dn = ch.clip(lower=0), -ch.clip(upper=0)
     rs = up.ewm(alpha=1 / 14, adjust=False).mean() / dn.ewm(alpha=1 / 14, adjust=False).mean().replace(0, np.nan)
     d["RSI"] = 100 - 100 / (1 + rs)
-    day = d.index.date
     typ = (d.High + d.Low + d.Close) / 3
-    pv = (typ * d.Volume).groupby(day).cumsum()
-    vv = d.Volume.groupby(day).cumsum()
-    d["VWAP"] = pv / vv.replace(0, np.nan)
+    d["VWAP"] = (typ * d.Volume).groupby(d["date"]).cumsum() / d.Volume.groupby(d["date"]).cumsum().replace(0, np.nan)
     return d
 
 
-def data_ok(t, interval):
-    step = 5 if interval == "5m" else 15
+def daily_table(d, k):
+    g = d.groupby("date")
+    typ = (d.High + d.Low + d.Close) / 3
+    out = pd.DataFrame({"open": g.Open.first(), "high": g.High.max(), "low": g.Low.min(), "close": g.Close.last(),
+                        "turn": (typ * d.Volume).groupby(d["date"]).sum() / 1e7})
+    out["ow"] = d.groupby("date").head(k).groupby("date").Volume.sum()
+    pc = out.close.shift(1)
+    tr = pd.concat([out.high - out.low, (out.high - pc).abs(), (out.low - pc).abs()], axis=1).max(axis=1)
+    out["pc"], out["pdh"], out["pdl"] = pc, out.high.shift(1), out.low.shift(1)
+    out["atr"] = tr.rolling(14).mean().shift(1)
+    out["avg_turn"] = out.turn.rolling(14).mean().shift(1)
+    out["avg_ow"] = out.ow.rolling(14).mean().shift(1)
+    return out
+
+
+def data_ok(t):
     start = t.index[0].replace(hour=9, minute=15, second=0, microsecond=0)
-    if (t.index[0] - start).total_seconds() / 60 > step:
-        return False, "opening 9:15 candle missing, so VWAP would be wrong"
-    elapsed = (t.index[-1] - start).total_seconds() / 60 / step + 1
+    if (t.index[0] - start).total_seconds() / 60 > 5:
+        return False, "opening 9:15 candle missing"
+    elapsed = (t.index[-1] - start).total_seconds() / 60 / 5 + 1
     if len(t) < 0.85 * elapsed:
         return False, "gaps in today's candles"
     return True, ""
 
 
-def analyze(sym, d, look, plan, interval):
-    d = add_ind(d)
-    ld = d.index[-1].date()
-    t = d[d.index.date == ld]
-    if len(t) < 4 or t.VWAP.isna().all():
-        return None
-    ok, why = data_ok(t, interval)
-    if not ok:
-        return {"Symbol": sym, "_skip": why}
-    prev = d[d.index.date < ld]
-    pc = prev.Close.iloc[-1] if len(prev) else np.nan
-    side = np.sign((t.Close - t.VWAP).values)
+def checks(side, ltp, e9, e21, rsi, v, risk, row, P):
+    ema = e9 > e21 if side == 1 else e9 < e21
+    rz = 50 <= rsi <= 75 if side == 1 else 25 <= rsi <= 50
+    vm = v.mean()
+    vx = float(v[-3:].mean() / vm) if vm > 0 else 0.0
+    ext = row.pdh if side == 1 else row.pdl
+    free = (side == 1 and ltp >= ext) or (side == -1 and ltp <= ext) or risk <= 0
+    room = 99.0 if free else abs(ext - ltp) / risk
+    return [bool(ema), bool(rz), bool(vx >= P["vol_x"]), bool(room >= 1.0)], vx, room
+
+
+def qty_for(entry, risk, P):
+    if risk <= 0:
+        return 0
+    return int(max(0, min(P["risk"] // risk, P["capital"] * P["lev"] // entry)))
+
+
+def rank_score(rv, nchk, room):
+    return round(40 * min(rv / 3, 1) + 30 * nchk / 4 + 30 * min(room / 3, 1), 1)
+
+
+# ============================================================ live funnel
+def evaluate(sym, d, daily, P, live):
+    k = P["k"]
+    D = daily.index[-1]
+    t = d[d["date"] == D]
     n = len(t)
-    cross = None
-    for j in range(n - 1, max(n - 1 - look, 0), -1):
-        if side[j - 1] < 0 and side[j] > 0 and side[-1] > 0:
-            cross = ("UP", j)
+    r = {"Symbol": sym, "S1": False, "S2": False, "S3": False, "S4": False, "S5": False, "Why": "", "Skip": False}
+    row = daily.loc[D]
+    if pd.isna(row.avg_ow) or pd.isna(row.atr) or pd.isna(row.avg_turn) or row.avg_ow <= 0:
+        r.update(Skip=True, Why="not enough history")
+        return r
+    ok, why = data_ok(t)
+    if not ok:
+        r.update(Skip=True, Why=why + ", VWAP would be wrong")
+        return r
+    ltp = float(t.Close.iloc[-1])
+    r["LTP"] = round(ltp, 2)
+    atrp = row.atr / ltp * 100
+    r["ATR %"] = round(atrp, 2)
+    if not (row.avg_turn >= P["min_turn"] and ltp >= P["min_price"] and atrp >= P["min_atr"]):
+        r["Why"] = f"1: turnover {row.avg_turn:.0f} Cr, ATR {atrp:.1f}%"
+        return r
+    r["S1"] = True
+    if n < k:
+        r["Why"] = "2: waiting for the opening range to finish"
+        return r
+    rv = float(row.ow / row.avg_ow)
+    gap = float((row.open / row.pc - 1) * 100)
+    r["RelVol"], r["Gap %"] = round(rv, 2), round(gap, 2)
+    if not (rv >= P["relvol"] and abs(gap) >= P["gap"]):
+        r["Why"] = f"2: opening volume {rv:.1f}x, gap {gap:+.1f}%"
+        return r
+    r["S2"] = True
+    o, h, l, c, v = (t[x].to_numpy() for x in ("Open", "High", "Low", "Close", "Volume"))
+    vw, e9, e21, rsi = (t[x].to_numpy() for x in ("VWAP", "EMA9", "EMA21", "RSI"))
+    or_hi, or_lo = h[:k].max(), l[:k].min()
+    bias = 1 if c[k - 1] > o[0] else (-1 if c[k - 1] < o[0] else 0)
+    trig = None
+    for j in range(k, n):
+        if c[j] > or_hi:
+            trig = (1, j)
             break
-        if side[j - 1] > 0 and side[j] < 0 and side[-1] < 0:
-            cross = ("DOWN", j)
+        if c[j] < or_lo:
+            trig = (-1, j)
             break
-    if cross is None:
-        return None
-    dirn, j = cross
-    long = dirn == "UP"
-    ltp, vw = float(t.Close.iloc[-1]), float(t.VWAP.iloc[-1])
-    turnover = float(((t.High + t.Low + t.Close) / 3 * t.Volume).sum()) / 1e7
-    mv = t.Volume.mean()
-    vr = float(t.Volume.iloc[-3:].mean() / mv) if mv > 0 else np.nan
-    or_hi, or_lo = t.High.iloc[:3].max(), t.Low.iloc[:3].min()
-    rsi, e9, e21 = t.RSI.iloc[-1], t.EMA9.iloc[-1], t.EMA21.iloc[-1]
-    checks = [
-        e9 > e21 if long else e9 < e21,
-        50 <= rsi <= 75 if long else 25 <= rsi <= 50,
-        vr >= 1.3,
-        ltp > pc if long else ltp < pc,
-        ltp > or_hi if long else ltp < or_lo,
-    ]
-    score = int(sum(bool(c) for c in checks))
-    stop = vw * (0.999 if long else 1.001)
+    r["OR High"], r["OR Low"] = round(float(or_hi), 2), round(float(or_lo), 2)
+    if trig is None:
+        r["Why"] = "3: no close beyond the opening range yet"
+        return r
+    side, j = trig
+    r["Side"] = "LONG" if side == 1 else "SHORT"
+    r["Trigger"], r["Ago"] = t.index[j].strftime("%H:%M"), n - 1 - j
+    beyond = c[-1] > or_hi if side == 1 else c[-1] < or_lo
+    stopped = l[j:].min() <= or_lo if side == 1 else h[j:].max() >= or_hi
+    vwap_ok = c[-1] > vw[-1] if side == 1 else c[-1] < vw[-1]
+    bias_ok = (not P["bias"]) or bias == side
+    timed = (not (live and P["window"])) or t.index[-1].time() <= P["cutoff"]
+    r["VWAP"] = round(float(vw[-1]), 2)
+    bad = []
+    if not beyond or stopped:
+        bad.append("breakout failed")
+    if not vwap_ok:
+        bad.append("price on the wrong side of VWAP")
+    if not bias_ok:
+        bad.append("opening candle direction disagrees")
+    if live and r["Ago"] > P["fresh"]:
+        bad.append("breakout is old")
+    if not timed:
+        bad.append("after the entry cut-off time")
+    if bad:
+        r["Why"] = "3: " + ", ".join(bad)
+        return r
+    r["S3"] = True
+    stop = float(or_lo if side == 1 else or_hi)
+    risk = abs(ltp - stop)
+    ck, vx, room = checks(side, ltp, e9[-1], e21[-1], rsi[-1], v, risk, row, P)
+    r.update(RSI=round(float(rsi[-1]), 1), VolX=round(vx, 2), Room=round(min(room, 9.9), 1), Checks=ck)
+    if sum(ck) < P["min_checks"]:
+        names = ["EMA trend", "RSI zone", "volume", "room to run"]
+        r["Why"] = "4: weak on " + ", ".join(nm for nm, ok_ in zip(names, ck) if not ok_)
+        return r
+    r["S4"] = True
+    risk_pct = risk / ltp * 100
+    long = side == 1
     if (long and stop >= ltp) or ((not long) and stop <= ltp):
-        stop = ltp * (0.995 if long else 1.005)
-    rps = abs(ltp - stop)
-    target = ltp + plan["rr"] * rps if long else ltp - plan["rr"] * rps
-    qty = int(max(0, min(plan["risk"] // rps, plan["capital"] * plan["lev"] // ltp))) if rps > 0 else 0
-    return {
-        "Symbol": sym, "Direction": dirn, "LTP": round(ltp, 2),
-        "Chg %": round((ltp / pc - 1) * 100, 2) if pc == pc else np.nan,
-        "VWAP": round(vw, 2), "Gap to VWAP %": round((ltp / vw - 1) * 100, 2),
-        "Crossed at": t.index[j].strftime("%H:%M"), "_candles": n, "Candles ago": n - 1 - j,
-        "Vol x": round(vr, 2) if vr == vr else np.nan, "RSI": round(float(rsi), 1),
-        "Score /5": score, "Turnover Cr": round(turnover, 1),
-        "Entry": round(ltp, 2), "Stop": round(stop, 2), "Target": round(target, 2), "Qty": qty,
-        "_last": t.index[-1],
-    }
+        r["Why"] = "5: stop is on the wrong side"
+        return r
+    target = ltp + side * P["rr"] * risk
+    qty = qty_for(ltp, risk, P)
+    r.update(Entry=round(ltp, 2), Stop=round(stop, 2), Target=round(target, 2), Qty=qty, **{"Risk %": round(risk_pct, 2)})
+    if not (P["min_risk"] <= risk_pct <= P["max_risk"]):
+        r["Why"] = f"5: stop distance {risk_pct:.2f}% is outside {P['min_risk']}-{P['max_risk']}%"
+        return r
+    if P["rr"] * risk_pct < 3 * P["cost_pct"]:
+        r["Why"] = "5: reward too small compared with costs"
+        return r
+    if qty < 1:
+        r["Why"] = "5: quantity is 0 with your risk and capital settings"
+        return r
+    r["S5"] = True
+    r["Rank"] = rank_score(rv, sum(ck), room)
+    r["_last"] = t.index[-1]
+    return r
 
 
-# ---------------------------------------------------------------- journal
+# ============================================================ backtest
+def backtest(datas, P, days, topk):
+    k = P["k"]
+    trades = []
+    for sym, d0 in datas.items():
+        try:
+            d = prep(d0)
+            daily = daily_table(d, k)
+            dates = list(daily.index)[-days:]
+            for D in dates:
+                row = daily.loc[D]
+                if pd.isna(row.avg_ow) or pd.isna(row.atr) or pd.isna(row.avg_turn) or row.avg_ow <= 0 or pd.isna(row.pc):
+                    continue
+                t = d[d["date"] == D]
+                n = len(t)
+                if n < k + 3 or not data_ok(t)[0]:
+                    continue
+                if row.avg_turn < P["min_turn"] or row.open < P["min_price"] or row.atr / row.open * 100 < P["min_atr"]:
+                    continue
+                rv = float(row.ow / row.avg_ow)
+                if rv < P["relvol"] or abs((row.open / row.pc - 1) * 100) < P["gap"]:
+                    continue
+                o, h, l, c, v = (t[x].to_numpy() for x in ("Open", "High", "Low", "Close", "Volume"))
+                vw, e9, e21, rsi = (t[x].to_numpy() for x in ("VWAP", "EMA9", "EMA21", "RSI"))
+                times = t.index
+                or_hi, or_lo = h[:k].max(), l[:k].min()
+                bias = 1 if c[k - 1] > o[0] else (-1 if c[k - 1] < o[0] else 0)
+                for j in range(k, n - 1):
+                    if times[j].time() > P["cutoff"]:
+                        break
+                    side = 1 if c[j] > or_hi else (-1 if c[j] < or_lo else 0)
+                    if side == 0 or (P["bias"] and bias != side):
+                        continue
+                    if (side == 1 and c[j] <= vw[j]) or (side == -1 and c[j] >= vw[j]):
+                        continue
+                    if (side == 1 and l[k:j + 1].min() <= or_lo) or (side == -1 and h[k:j + 1].max() >= or_hi):
+                        break
+                    stop = or_lo if side == 1 else or_hi
+                    ent = o[j + 1]
+                    risk = (ent - stop) * side
+                    if risk <= 0:
+                        continue
+                    rp = risk / ent * 100
+                    if not (P["min_risk"] <= rp <= P["max_risk"]) or P["rr"] * rp < 3 * P["cost_pct"]:
+                        continue
+                    ck, vx, room = checks(side, c[j], e9[j], e21[j], rsi[j], v[:j + 1], risk, row, P)
+                    if sum(ck) < P["min_checks"]:
+                        continue
+                    target = ent + side * P["rr"] * risk
+                    qty = qty_for(ent, risk, P)
+                    if qty < 1:
+                        continue
+                    ex, why, et = c[n - 1], "EOD", times[n - 1]
+                    for m in range(j + 1, n):
+                        if side == 1:
+                            if l[m] <= stop:
+                                ex, why, et = stop, "STOP", times[m]
+                                break
+                            if h[m] >= target:
+                                ex, why, et = target, "TARGET", times[m]
+                                break
+                        else:
+                            if h[m] >= stop:
+                                ex, why, et = stop, "STOP", times[m]
+                                break
+                            if l[m] <= target:
+                                ex, why, et = target, "TARGET", times[m]
+                                break
+                    gross = (ex - ent) * side * qty
+                    cost = P["cost_pct"] / 100 * ent * qty
+                    trades.append({"date": str(D), "time": times[j + 1].strftime("%H:%M"), "symbol": sym,
+                                   "side": "LONG" if side == 1 else "SHORT", "entry": round(float(ent), 2),
+                                   "exit": round(float(ex), 2), "result": why, "qty": qty,
+                                   "net": round(float(gross - cost), 2), "R": round(float((gross - cost) / (risk * qty)), 2),
+                                   "relvol": round(rv, 2)})
+                    break
+        except Exception:
+            continue
+    tr = pd.DataFrame(trades)
+    if tr.empty:
+        return tr
+    tr = tr.sort_values(["date", "time"])
+    tr = tr.groupby("date").head(topk).reset_index(drop=True)
+    return tr
+
+
+# ============================================================ journal
 def norm(df):
     for c in COLS:
         if c not in df.columns:
@@ -209,7 +384,7 @@ def norm(df):
     df = df[COLS].copy()
     for c in ("setup", "note", "status", "side", "symbol", "date", "time", "exit_time"):
         df[c] = df[c].fillna("").astype(str)
-    for c in ("id", "entry", "stop", "target", "qty", "exit", "gross", "costs", "net", "r", "score"):
+    for c in ("id", "entry", "stop", "target", "qty", "exit", "gross", "costs", "net", "r", "relvol", "rank"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
@@ -234,10 +409,9 @@ def add_trade(r, setup, note):
     j = st.session_state.journal
     nid = int(pd.to_numeric(j["id"], errors="coerce").max() + 1) if len(j) else 1
     last = r["_last"]
-    new = {"id": nid, "date": last.strftime("%Y-%m-%d"), "time": last.strftime("%H:%M"),
-           "symbol": r["Symbol"], "side": "LONG" if r["Direction"] == "UP" else "SHORT",
-           "entry": r["Entry"], "stop": r["Stop"], "target": r["Target"], "qty": r["Qty"],
-           "status": "OPEN", "score": r["Score /5"], "setup": setup, "note": note}
+    new = {"id": nid, "date": last.strftime("%Y-%m-%d"), "time": last.strftime("%H:%M"), "symbol": r["Symbol"],
+           "side": r["Side"], "entry": r["Entry"], "stop": r["Stop"], "target": r["Target"], "qty": r["Qty"],
+           "status": "OPEN", "relvol": r["RelVol"], "rank": r["Rank"], "setup": setup, "note": note}
     st.session_state.journal = norm(pd.concat([j, pd.DataFrame([new])], ignore_index=True))
     save_journal()
 
@@ -286,173 +460,190 @@ def check_open(data, cfg):
                     hit = (r.target, "TARGET", ts)
             if hit:
                 break
-        if not hit:
-            latest_day = d.index[-1].date()
-            if day < latest_day or dd.index[-1].time() >= dtime(15, 10):
-                hit = (float(dd.Close.iloc[-1]), "EOD", dd.index[-1])
+        if not hit and (day < d.index[-1].date() or dd.index[-1].time() >= dtime(15, 10)):
+            hit = (float(dd.Close.iloc[-1]), "EOD", dd.index[-1])
         if hit:
             close_trade(i, hit[0], hit[1], hit[2].strftime("%H:%M"), cfg)
             done += 1
     return done
 
 
-# ---------------------------------------------------------------- sidebar
+# ============================================================ sidebar
 with st.sidebar:
-    st.header("Settings")
-    wl = st.text_area("Stocks to scan (NSE symbols, comma separated)", DEFAULT_LIST, height=140)
-    interval = st.selectbox("Candle size", ["5m", "15m"], index=0)
-    look = st.slider("'Just crossed' means within last N candles", 1, 6, 3)
-    maxgap = st.slider("Maximum distance from VWAP (%)", 0.1, 2.0, 0.5, 0.1)
-    min_score = st.slider("Minimum score (out of 5)", 0, 5, 2)
-    min_turn = st.number_input("Minimum turnover today (Rs crore)", 0.0, 500.0, 5.0, 1.0)
-    st.subheader("Paper trading")
-    capital = st.number_input("Paper capital (Rs)", 5000, 10000000, 50000, 5000)
-    risk = st.number_input("Risk per trade (Rs)", 50, 100000, 250, 50)
-    rr = st.number_input("Target = risk x", 0.5, 5.0, 1.5, 0.5)
-    lev = st.number_input("Leverage (1 = none)", 1, 5, 1, 1)
-    flat = st.number_input("Brokerage per order (Rs)", 0.0, 100.0, 20.0, 5.0)
-    pct = st.number_input("Taxes and charges (% of turnover)", 0.0, 0.5, 0.04, 0.01)
+    st.markdown("### ⚙️ Settings")
+    wl = st.text_area("Stocks to scan (NSE symbols)", DEFAULT_LIST, height=120)
+    with st.expander("Stage 1 · Quality"):
+        min_turn = st.number_input("Average daily turnover at least (Rs crore)", 1.0, 5000.0, 50.0, 10.0)
+        min_price = st.number_input("Price at least (Rs)", 1.0, 10000.0, 50.0, 10.0)
+        min_atr = st.number_input("Daily range (ATR) at least (% of price)", 0.1, 10.0, 1.0, 0.1)
+    with st.expander("Stage 2 · In play"):
+        relvol = st.number_input("Opening volume vs 14-day average at least (x)", 1.0, 10.0, 1.5, 0.1)
+        gap = st.number_input("Gap from yesterday's close at least (%)", 0.0, 5.0, 0.3, 0.1)
+    with st.expander("Stage 3 · Trigger"):
+        or_min = st.selectbox("Opening range length (minutes)", [5, 15, 30], index=1)
+        bias = st.checkbox("Opening candle direction must agree", True)
+        fresh = st.slider("Breakout must be within last N candles", 1, 30, 9)
+        window = st.checkbox("Use entry time window while market is open", True)
+        cutoff = st.time_input("No new entries after", dtime(14, 30))
+    with st.expander("Stage 4 · Momentum"):
+        vol_x = st.number_input("Recent volume vs day average at least (x)", 0.5, 5.0, 1.2, 0.1)
+        min_checks = st.slider("Checks needed (of 4)", 1, 4, 3)
+    with st.expander("Stage 5 · Trade plan"):
+        rr = st.number_input("Target = risk x", 0.5, 5.0, 1.5, 0.5)
+        min_risk = st.number_input("Stop distance at least (%)", 0.05, 5.0, 0.2, 0.05)
+        max_risk = st.number_input("Stop distance at most (%)", 0.2, 10.0, 1.5, 0.1)
+        cost_pct = st.number_input("Round-trip cost estimate (% of price)", 0.0, 1.0, 0.10, 0.01)
+    with st.expander("Paper money"):
+        capital = st.number_input("Paper capital (Rs)", 5000, 10000000, 50000, 5000)
+        risk_amt = st.number_input("Risk per trade (Rs)", 50, 100000, 250, 50)
+        lev = st.number_input("Leverage (1 = none)", 1, 5, 1, 1)
+        flat = st.number_input("Brokerage per order (Rs)", 0.0, 100.0, 20.0, 5.0)
+        pct = st.number_input("Taxes and charges (% of turnover)", 0.0, 0.5, 0.04, 0.01)
     if st.button("Refresh data now", width="stretch"):
         st.cache_data.clear()
         st.rerun()
 
-plan = {"capital": capital, "risk": risk, "rr": rr, "lev": lev}
+P = dict(k=or_min // 5, min_turn=min_turn, min_price=min_price, min_atr=min_atr, relvol=relvol, gap=gap, bias=bias,
+         fresh=fresh, window=window, cutoff=cutoff, vol_x=vol_x, min_checks=min_checks, rr=rr, min_risk=min_risk,
+         max_risk=max_risk, cost_pct=cost_pct, capital=capital, risk=risk_amt, lev=lev)
 cfg = {"flat": flat, "pct": pct}
 symbols = tuple(dict.fromkeys(s.strip().upper() for s in wl.replace("\n", ",").split(",") if s.strip()))
 if "journal" not in st.session_state:
     st.session_state.journal = load_journal()
 
-# ---------------------------------------------------------------- header
+# ============================================================ header + data
 st.markdown("""<div class="hero"><h1>🎯 Intraday Hunter</h1>
-<p>Stocks that have just crossed VWAP, with trend, volume and risk levels. Practice on paper, keep a journal.</p></div>""",
+<p>A five-stage funnel: quality, in play, trigger, momentum and trade plan. Only stocks that pass every stage reach the top.</p></div>""",
             unsafe_allow_html=True)
 
-with st.spinner("Getting prices..."):
+with st.spinner("Getting prices for the last 60 days (first load takes a little while)..."):
     try:
-        data = fetch(symbols, interval)
+        data = fetch(symbols)
     except Exception as e:
         data = {}
         st.error(f"Could not get prices: {e}")
 
-rows, skipped = [], []
+last_candle = max((d.index[-1] for d in data.values()), default=None)
+lag = (now_ist() - last_candle).total_seconds() / 60 if last_candle is not None else 9999
+live = lag <= 20
+
+results, prepared = [], {}
 for s, d in data.items():
     try:
-        r = analyze(s, d, look, plan, interval)
+        pdx = prep(d)
+        dly = daily_table(pdx, P["k"])
+        prepared[s] = (pdx, dly)
+        results.append(evaluate(s, pdx, dly, P, live))
     except Exception:
-        r = None
-    if r and "_skip" in r:
-        skipped.append((r["Symbol"], r["_skip"]))
-    elif r:
-        rows.append(r)
-scan = pd.DataFrame(rows)
-last_candle = max((d.index[-1] for d in data.values()), default=None)
+        continue
+res = pd.DataFrame(results)
+skipped = res[res.Skip] if len(res) else res
+valid = res[~res.Skip] if len(res) else res
+cnt = [len(valid)] + [int(valid[f"S{i}"].sum()) if len(valid) else 0 for i in range(1, 6)]
+final = valid[valid.S5].sort_values("Rank", ascending=False) if (len(valid) and valid.S5.any()) else valid.iloc[0:0]
 
-c1, c2, c3, c4 = st.columns(4)
-n_up = int((scan.Direction == "UP").sum()) if len(scan) else 0
-n_dn = int((scan.Direction == "DOWN").sum()) if len(scan) else 0
-for col, val, lab in ((c1, len(data), "Stocks scanned"), (c2, n_up, "Just crossed above VWAP"),
-                      (c3, n_dn, "Just crossed below VWAP"),
-                      (c4, last_candle.strftime("%d %b, %H:%M") if last_candle is not None else "-", "Latest candle (IST)")):
-    col.markdown(f'<div class="kpi"><b>{val}</b><span>{lab}</span></div>', unsafe_allow_html=True)
-if last_candle is not None:
-    lag = (now_ist() - last_candle).total_seconds() / 60
-    if lag > 20:
-        st.markdown(f'<div class="warn">The latest price candle is about {int(lag)} minutes old. The market may be closed, '
-                    f'or Yahoo data may be delayed. Do not treat these levels as live.</div>', unsafe_allow_html=True)
+c = st.columns(5)
+for col, val, lab in zip(c, [len(data), cnt[2], cnt[3], len(final), last_candle.strftime("%d %b, %H:%M") if last_candle is not None else "-"],
+                         ["Stocks scanned", "In play today", "Triggered (stage 3)", "Fully qualified", "Latest candle (IST)"]):
+    col.markdown(f'<div class="kpi"><b>{val}</b><span>{lab.upper()}</span></div>', unsafe_allow_html=True)
+if last_candle is not None and not live:
+    st.markdown(f'<div class="note">The market looks closed (latest candle is {int(lag)} minutes old). You are looking at the '
+                f'last session as a review. The entry time window is not applied, and levels are not live.</div>', unsafe_allow_html=True)
 
-if not len(st.session_state.journal):
-    st.info("Journal is empty. This free host can wipe saved files when it restarts or sleeps. If you have an earlier "
-            "journal, restore it in the Paper trades tab (Restore journal). Download a copy after every session.")
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 VWAP cross scanner", "📈 Chart", "📒 Paper trades & journal", "ℹ️ How it works"])
+tabs = st.tabs(["🏆 Top picks", "🔻 Funnel", "📈 Chart", "📒 Paper trades", "🧪 Backtest", "ℹ️ Guide"])
 
-SHOW = ["Symbol", "LTP", "Chg %", "VWAP", "Gap to VWAP %", "Crossed at", "Candles ago", "Vol x", "RSI",
-        "Score /5", "Entry", "Stop", "Target", "Qty"]
-if len(scan):
-    scan = scan[(scan["Score /5"] >= min_score) & (scan["Turnover Cr"] >= min_turn)
-                & (scan["Gap to VWAP %"].abs() <= maxgap)]
-
-# ---------------------------------------------------------------- scanner
-with tab1:
-    if not len(scan):
-        st.info("No stock has just crossed VWAP with these settings. Try lowering the minimum score, or press Refresh.")
+# ------------------------------------------------------------ top picks
+with tabs[0]:
+    if not len(final):
+        st.info("No stock has passed all five stages right now. That is normal on many days. Check the Funnel tab to see "
+                "where stocks dropped out, and come back after a few minutes.")
     else:
-        for name, cls, label in (("UP", "up", "Crossed ABOVE VWAP (possible buy side)"),
-                                 ("DOWN", "dn", "Crossed BELOW VWAP (possible sell side)")):
-            sub = scan[scan.Direction == name].sort_values(["Score /5", "Candles ago"], ascending=[False, True])
-            st.markdown(f'<span class="pill {cls}">{label}</span>  &nbsp; {len(sub)} stock(s)', unsafe_allow_html=True)
-            if len(sub):
-                st.dataframe(sub[SHOW], hide_index=True, width="stretch")
-            else:
-                st.caption("None right now.")
-        st.markdown("##### Log a paper trade")
-        opts = [f"{r.Symbol} - {r.Direction}" for r in scan.sort_values("Score /5", ascending=False).itertuples()]
-        a, b, c = st.columns([2, 2, 3])
-        pick = a.selectbox("Stock", opts)
-        setup = b.text_input("Setup tag", "VWAP cross")
-        note = c.text_input("Why are you taking it? (optional)")
-        if st.button("Take paper trade", type="primary"):
-            sym = pick.split(" - ")[0]
-            rr_ = scan[scan.Symbol == sym].iloc[0].to_dict()
-            j = st.session_state.journal
-            if len(j[(j.symbol == sym) & (j.status == "OPEN")]):
-                st.warning(f"{sym} already has an open paper trade.")
-            elif rr_["Qty"] < 1:
-                st.warning("Quantity comes to 0 with your risk and capital settings. Increase risk or capital.")
-            else:
-                add_trade(rr_, setup, note)
-                st.success(f"Logged {sym} ({rr_['Direction']}) at {rr_['Entry']}. See the Paper trades tab.")
-        if skipped:
-            with st.expander(f"{len(skipped)} stock(s) skipped because Yahoo data is incomplete"):
-                st.write(", ".join(f"{a} ({b})" for a, b in skipped))
-        st.caption("Stop is just beyond VWAP. Qty keeps the loss near your risk amount if the stop is hit. This is for practice only.")
+        top = final.head(6)
+        cols = st.columns(3)
+        for idx, (_, r) in enumerate(top.iterrows()):
+            cls = "long" if r.Side == "LONG" else "short"
+            chips = "".join(f"<span>✓ {nm}</span>" for nm in STAGES)
+            sub = ["EMA trend", "RSI zone", "Volume", "Room to run"]
+            chips2 = "".join(f'<span class="{"" if ok else "no"}">{"✓" if ok else "✗"} {nm}</span>' for nm, ok in zip(sub, r.Checks))
+            html = f"""<div class="pick {cls}"><h3>{r.Symbol}<span class="pill {cls}">{r.Side}</span><span class="pill rank">Rank {r.Rank:.0f}</span></h3>
+            <div class="sub">Broke the opening range at {r.Trigger} ({int(r.Ago)} candle(s) ago) · LTP {r.LTP:.2f}</div>
+            <div class="grid"><div>Entry<b>{r.Entry:.2f}</b></div><div>Stop<b>{r.Stop:.2f}</b></div><div>Target<b>{r.Target:.2f}</b></div>
+            <div>Quantity<b>{int(r.Qty)}</b></div><div>Opening volume<b>{r.RelVol:.1f}x</b></div><div>Gap<b>{r["Gap %"]:+.1f}%</b></div></div>
+            <div class="chips">{chips}</div><div class="chips">{chips2}</div></div>"""
+            with cols[idx % 3]:
+                st.markdown(html, unsafe_allow_html=True)
+                if st.button("Take paper trade", key=f"pt_{r.Symbol}"):
+                    j = st.session_state.journal
+                    if len(j[(j.symbol == r.Symbol) & (j.status == "OPEN")]):
+                        st.warning("Already open.")
+                    else:
+                        add_trade(r.to_dict(), "Funnel pick", "")
+                        st.success("Logged. See the Paper trades tab.")
+        st.caption("Rank is only for sorting (opening volume, momentum checks and room to run). It is not a probability of winning. "
+                   "Stop is the other end of the opening range. Quantity keeps the loss near your risk amount.")
 
-# ---------------------------------------------------------------- chart
-with tab2:
-    if not data:
+# ------------------------------------------------------------ funnel
+with tabs[1]:
+    labels = ["Scanned (data ok)"] + [f"{i + 1} · {n}" for i, n in enumerate(STAGES)]
+    fig = go.Figure(go.Funnel(y=labels, x=cnt, textinfo="value+percent initial",
+                              marker=dict(color=["#355c7d", "#3d7a8f", "#2a9d8f", "#6a994e", "#e9a23b", "#14a44d"])))
+    fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig, width="stretch")
+    if len(res):
+        t1 = valid.copy()
+        t1["Stage reached"] = t1[["S1", "S2", "S3", "S4", "S5"]].sum(axis=1)
+        for i in range(1, 6):
+            t1[f"S{i}"] = t1[f"S{i}"].map({True: "✅", False: "·"})
+        show = [c_ for c_ in ["Symbol", "Stage reached", "S1", "S2", "S3", "S4", "S5", "Side", "LTP", "RelVol", "Gap %",
+                              "Trigger", "VolX", "RSI", "Why"] if c_ in t1.columns]
+        st.markdown("##### Every stock, and where it stopped")
+        st.dataframe(t1.sort_values("Stage reached", ascending=False)[show], hide_index=True, width="stretch")
+        if len(skipped):
+            with st.expander(f"{len(skipped)} stock(s) skipped (incomplete Yahoo data)"):
+                st.write(", ".join(f"{a} ({b})" for a, b in zip(skipped.Symbol, skipped.Why)))
+
+# ------------------------------------------------------------ chart
+with tabs[2]:
+    if not prepared:
         st.info("No data yet.")
     else:
-        names = list(scan.Symbol) if len(scan) else []
-        names += [s for s in data if s not in names]
+        names = list(final.Symbol) + [s for s in prepared if s not in list(final.Symbol)]
         sym = st.selectbox("Stock", names)
-        d = add_ind(data[sym])
-        days = sorted(set(d.index.date))[-2:]
-        d = d[[x in days for x in d.index.date]]
+        pdx, dly = prepared[sym]
+        days = sorted(set(pdx["date"]))[-2:]
+        d = pdx[pdx["date"].isin(days)]
+        D = days[-1]
         fig = go.Figure()
         fig.add_trace(go.Candlestick(x=d.index, open=d.Open, high=d.High, low=d.Low, close=d.Close, name="Price"))
         fig.add_trace(go.Scatter(x=d.index, y=d.VWAP, name="VWAP", line=dict(color="#f08c00", width=2)))
         fig.add_trace(go.Scatter(x=d.index, y=d.EMA9, name="EMA 9", line=dict(color="#1c7ed6", width=1)))
         fig.add_trace(go.Scatter(x=d.index, y=d.EMA21, name="EMA 21", line=dict(color="#ae3ec9", width=1)))
-        j = st.session_state.journal
-        for r in j[(j.symbol == sym)].itertuples():
-            fig.add_hline(y=r.entry, line_dash="dot", annotation_text=f"{r.side} entry #{r.id}")
-        fig.update_layout(height=560, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10),
+        t = d[d["date"] == D]
+        if len(t) >= P["k"]:
+            fig.add_hline(y=float(t.High.iloc[:P["k"]].max()), line_dash="dash", line_color="#14a44d", annotation_text="Opening range high")
+            fig.add_hline(y=float(t.Low.iloc[:P["k"]].min()), line_dash="dash", line_color="#e03131", annotation_text="Opening range low")
+        fig.update_layout(height=580, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=20, b=10),
                           xaxis=dict(rangebreaks=[dict(bounds=["sat", "mon"]), dict(bounds=[15.5, 9.25], pattern="hour")]))
         st.plotly_chart(fig, width="stretch")
-        tt = d[d.index.date == d.index[-1].date()]
-        st.markdown("##### Check the VWAP against your broker")
+        row = dly.loc[D]
         k = st.columns(4)
-        k[0].metric("App VWAP", f"{tt.VWAP.iloc[-1]:.2f}")
-        k[1].metric("Last price", f"{tt.Close.iloc[-1]:.2f}")
-        k[2].metric("Candles today", len(tt))
-        k[3].metric("First candle", tt.index[0].strftime("%H:%M"))
-        bv = st.number_input("Your broker's VWAP for this stock (optional)", 0.0, 1000000.0, 0.0, 0.05)
+        k[0].metric("App VWAP", f"{t.VWAP.iloc[-1]:.2f}")
+        k[1].metric("Last price", f"{t.Close.iloc[-1]:.2f}")
+        k[2].metric("Candles today", len(t))
+        k[3].metric("Opening volume vs avg", f"{row.ow / row.avg_ow:.1f}x" if row.avg_ow and row.avg_ow == row.avg_ow else "-")
+        bv = st.number_input("Your broker's VWAP for this stock (optional check)", 0.0, 1000000.0, 0.0, 0.05)
         if bv > 0:
-            diff = (tt.VWAP.iloc[-1] / bv - 1) * 100
-            if abs(diff) > 0.15:
-                st.warning(f"The app VWAP is {diff:+.2f}% away from your broker's. Yahoo volumes differ from the exchange, "
-                           "so treat the broker's VWAP as the reference and use this list only as a first filter.")
-            else:
-                st.success(f"The app VWAP is within {abs(diff):.2f}% of your broker's.")
+            diff = (t.VWAP.iloc[-1] / bv - 1) * 100
+            (st.warning if abs(diff) > 0.15 else st.success)(
+                f"App VWAP is {diff:+.2f}% from your broker's. " + ("Yahoo volumes differ from the exchange, so trust the broker's VWAP." if abs(diff) > 0.15 else "Close enough."))
 
-# ---------------------------------------------------------------- journal
-with tab3:
+# ------------------------------------------------------------ journal
+with tabs[3]:
     j = st.session_state.journal
-    top = st.columns([1, 1, 2])
-    if top[0].button("Check open trades (stop / target)", type="primary"):
-        n = check_open(data, cfg)
-        st.success(f"{n} trade(s) closed.") if n else st.info("No open trade hit its stop or target yet.")
+    if st.button("Check open trades (stop / target)", type="primary"):
+        n_ = check_open(data, cfg)
+        st.success(f"{n_} trade(s) closed.") if n_ else st.info("No open trade hit its stop or target yet.")
         j = st.session_state.journal
-
     op = j[j.status == "OPEN"]
     st.markdown(f"##### Open trades ({len(op)})")
     if len(op):
@@ -461,44 +652,36 @@ with tab3:
         o["LTP"] = o.symbol.map(ltp)
         o["Open P&L"] = ((o.LTP - o.entry) * o.qty * o.side.map({"LONG": 1, "SHORT": -1})).round(0)
         st.dataframe(o, hide_index=True, width="stretch")
-        a, b, c = st.columns([1, 1, 1])
+        a, b, c_ = st.columns(3)
         cid = a.selectbox("Close trade #", list(op.id.astype(int)))
         px = b.number_input("Exit price", 0.0, 1000000.0, float(ltp.get(op[op.id == cid].symbol.iloc[0], 0.0)), 0.05)
-        if c.button("Close it now"):
-            idx = j.index[j.id == cid][0]
-            close_trade(idx, px, "MANUAL", now_ist().strftime("%H:%M"), cfg)
+        if c_.button("Close it now"):
+            close_trade(j.index[j.id == cid][0], px, "MANUAL", now_ist().strftime("%H:%M"), cfg)
             st.rerun()
     else:
         st.caption("No open trades.")
-
     cl = j[j.status != "OPEN"].copy()
     st.markdown(f"##### Closed trades ({len(cl)})")
     if len(cl):
-        for c in ("net", "gross", "costs", "r"):
-            cl[c] = pd.to_numeric(cl[c], errors="coerce")
-        wins = int((cl.net > 0).sum())
+        for c_ in ("net", "gross", "costs", "r", "relvol"):
+            cl[c_] = pd.to_numeric(cl[c_], errors="coerce")
         m = st.columns(5)
         m[0].metric("Trades", len(cl))
-        m[1].metric("Win rate", f"{wins / len(cl) * 100:.0f}%")
+        m[1].metric("Win rate", f"{(cl.net > 0).mean() * 100:.0f}%")
         m[2].metric("Net P&L (Rs)", f"{cl.net.sum():,.0f}")
         m[3].metric("Costs paid (Rs)", f"{cl.costs.sum():,.0f}")
         m[4].metric("Average R", f"{cl.r.mean():.2f}")
-        cum = cl.sort_values(["date", "time"]).net.cumsum().reset_index(drop=True)
-        st.line_chart(cum, height=200)
+        st.line_chart(cl.sort_values(["date", "time"]).net.cumsum().reset_index(drop=True), height=200)
         edited = st.data_editor(cl.sort_values("id", ascending=False), hide_index=True, width="stretch",
-                                disabled=[c for c in COLS if c not in ("setup", "note")], key="ed")
+                                disabled=[c_ for c_ in COLS if c_ not in ("setup", "note")], key="ed")
         if st.button("Save my setup / note edits"):
             jj = st.session_state.journal
             for _, r in edited.iterrows():
-                k = jj.index[jj.id == r["id"]]
-                jj.loc[k, "setup"] = r["setup"]
-                jj.loc[k, "note"] = r["note"]
+                kx = jj.index[jj.id == r["id"]]
+                jj.loc[kx, "setup"], jj.loc[kx, "note"] = r["setup"], r["note"]
             st.session_state.journal = jj
             save_journal()
             st.success("Saved.")
-    else:
-        st.caption("No closed trades yet.")
-
     st.markdown("##### Keep your journal safe")
     d1, d2 = st.columns(2)
     d1.download_button("Download journal (CSV)", st.session_state.journal.to_csv(index=False), "journal.csv", "text/csv")
@@ -507,28 +690,53 @@ with tab3:
         st.session_state.journal = norm(pd.read_csv(up))
         save_journal()
         st.rerun()
-    st.caption("Streamlit Cloud can reset saved files when the app restarts. Please download your journal at the end of every day.")
+    st.caption("Streamlit Cloud can reset saved files when the app restarts. Download your journal every evening.")
 
-# ---------------------------------------------------------------- guide
-with tab4:
+# ------------------------------------------------------------ backtest
+with tabs[4]:
+    st.markdown("Runs the same five stages on the last sessions Yahoo has (about 40 trading days of 5-minute data). "
+                "Entry is the **next candle's open** after the signal, stop is the other end of the opening range, "
+                "exit at target, stop or the last candle of the day. Stop is assumed to hit first when both fall in one candle.")
+    a, b = st.columns(2)
+    nd = a.slider("Sessions to test", 5, 40, 25)
+    topk = b.slider("Trades per day (first N signals)", 1, 5, 3)
+    if st.button("Run backtest", type="primary"):
+        with st.spinner("Testing..."):
+            st.session_state.bt = backtest(data, P, nd, topk)
+    tr = st.session_state.get("bt")
+    if tr is not None:
+        if tr.empty:
+            st.info("No trades passed all the stages in this period with these settings. Try lowering the opening-volume or checks settings.")
+        else:
+            win = tr[tr.net > 0].net.sum()
+            loss = -tr[tr.net < 0].net.sum()
+            cum = tr.net.cumsum()
+            m = st.columns(6)
+            m[0].metric("Trades", len(tr))
+            m[1].metric("Win rate", f"{(tr.net > 0).mean() * 100:.0f}%")
+            m[2].metric("Net P&L (Rs)", f"{tr.net.sum():,.0f}")
+            m[3].metric("Average R", f"{tr.R.mean():.2f}")
+            m[4].metric("Profit factor", f"{win / loss:.2f}" if loss > 0 else "-")
+            m[5].metric("Worst drawdown (Rs)", f"{(cum - cum.cummax()).min():,.0f}")
+            st.line_chart(cum, height=220)
+            st.dataframe(tr, hide_index=True, width="stretch")
+            st.markdown('<div class="warn">A backtest uses past data, Yahoo volumes and a simple cost estimate. A small number of trades '
+                        'can look good or bad by luck. Use it to reject weak settings, not to promise future profit.</div>', unsafe_allow_html=True)
+
+# ------------------------------------------------------------ guide
+with tabs[5]:
     st.markdown("""
-**What the scanner does**
-1. Gets 5-minute (or 15-minute) prices for your stock list from Yahoo Finance.
-2. Works out **VWAP** (the day's volume-weighted average price) from the 9:15 open.
-3. Finds stocks whose price **just crossed VWAP** in the last few candles and is still on that side.
+**The funnel (each stage passes only the survivors to the next)**
+1. **Quality:** enough turnover, a sensible price and enough daily movement (ATR), with complete data.
+2. **In play:** volume in the opening range is well above the same stock's average of the last 14 days, and there is a gap from yesterday's close.
+3. **Trigger:** a candle closes beyond the opening range (the first 15 minutes by default), price is on the matching side of VWAP, and the opening candle agrees with the direction.
+4. **Momentum:** EMA 9/21 trend, RSI zone, recent volume, and room to run before yesterday's high or low. A set number of these must pass.
+5. **Trade plan:** the stop (the other end of the range) is not too tight or too wide, the reward is clearly bigger than your costs, and the quantity fits your risk.
 
-**Score out of 5** (how many of these agree with the direction):
-EMA 9 vs EMA 21 trend, RSI zone, volume surge (last 3 candles vs day average), price vs yesterday's close, price beyond the first 15-minute range.
-A higher score means more signals agree. It does **not** mean the trade will work.
+**Timing:** 9:15 to 9:30 only builds the opening range. Entries are best looked at from about 9:30 to 11:00, no new entries after the cut-off time, and paper trades close at about 3:15 pm.
 
-**Paper trade plan:** entry at the last price, stop just beyond VWAP, target at your chosen multiple of the risk,
-quantity so that the loss at the stop is about your risk amount. Costs are estimated from the settings.
-
-**Rules to keep in mind**
-- Paper trade for at least 3-4 weeks and read the journal before using real money.
-- Intraday cash trades must be squared off the same day. The app closes open paper trades at about 3:15 pm.
-- Stocks with missing opening candles or gaps are skipped, because their VWAP would be wrong.
-- Yahoo volumes are not the exchange volumes, so VWAP can differ a little from your broker's. Check it in the Chart tab.
-- Yahoo data can be delayed or have gaps. Always compare with your broker screen.
-- This is a practice and learning tool, not investment advice.
+**Rules for yourself**
+- Paper trade for 3-4 weeks and read the journal, including costs, before using real money.
+- Data comes from Yahoo Finance and can be delayed or have gaps. Compare with your broker screen.
+- This is a learning tool, not investment advice. Most individual intraday traders lose money.
 """)
