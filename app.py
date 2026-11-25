@@ -587,7 +587,10 @@ Data is from Yahoo Finance and can be a few minutes late, so check your broker s
         j = st.session_state.journal
         if st.button("Check open trades (stop / target)", type="primary"):
             n_ = check_open(data, cfg)
-            st.success(f"{n_} trade(s) closed.") if n_ else st.info("No open trade hit its stop or target yet.")
+            if n_:
+                st.success(f"{n_} trade(s) closed.")
+            else:
+                st.info("No open trade hit its stop or target yet.")
             j = st.session_state.journal
         op = j[j.status == "OPEN"]
         st.markdown(f"##### Open trades ({len(op)})")
