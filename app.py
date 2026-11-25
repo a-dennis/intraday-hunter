@@ -1069,22 +1069,39 @@ def sector_pct(sym, pmap):
     return float(np.median(peers)), sec
 
 
-def classify(c, n, s):
+_RALLY = re.compile(r"(sector|sectoral|industry|index)\W.{0,60}(rally|rallies|rallied|surge|surges|surged|jump|jumps|jumped|gain|gains)"
+                    r"|(rally|rallies|rallied|surge|surges|surged)\W.{0,60}(sector|sectoral|industry)", re.I)
+
+
+def sector_rally_news(news, sec):
+    """True when a fetched headline talks about a sector-wide rally."""
+    for x in news or []:
+        t = x.get("title", "")
+        if _RALLY.search(t):
+            return True
+        if sec and re.search(re.escape(sec.split()[0]) + r".{0,25}(stocks|shares|index).{0,40}(rally|rallies|rallied|surge|surges|surged)", t, re.I):
+            return True
+    return False
+
+
+def classify(c, n, s, news=None, sec=None):
     """Market-driven / Sector-driven / Stock-specific. d = +1 for an up move, -1 for a down move."""
     if n is None:
         return "Mixed signals"
     d = 1 if c >= 0 else -1
     if abs(c - n) <= 1.0:
         return "Market-driven"
-    if s is not None and d * s >= 1.0 and d * (c - s) < 1.0:
+    if s is not None and d * (s - n) >= 2.0 and abs(c - s) <= 2.0:
         return "Sector-driven"
-    if d * (c - n) >= 2.0 and (s is None or d * (c - s) >= 1.0):
+    if d == 1 and sector_rally_news(news, sec):
+        return "Sector-driven"
+    if s is not None and d * (c - n) >= 3.0 and d * (c - s) >= 2.0:
         return "Stock-specific"
     return "Mixed signals"
 
 
 def why_html(sym, c, n, s, sec, news, show_news=True):
-    label = classify(c, n, s)
+    label = classify(c, n, s, news, sec)
     nums = [f"Stock {c:+.1f}%"]
     if n is not None:
         nums.append(f"Nifty {n:+.1f}%")
@@ -1096,7 +1113,7 @@ def why_html(sym, c, n, s, sec, news, show_news=True):
         reason = f"{reason} headline ({ago(top['age_h'])})" if top["tag"] else f"{reason} ({ago(top['age_h'])})"
         summary = f"{label} move. Possible reason: {reason}."
     elif label == "Stock-specific":
-        summary = "Stock-specific move, but no news found. Check NSE announcements before trading."
+        summary = "Unconfirmed: check NSE announcements"
     elif label in ("Market-driven", "Sector-driven"):
         summary = f"{label} move. No fresh news found."
     else:
@@ -1110,7 +1127,7 @@ def why_html(sym, c, n, s, sec, news, show_news=True):
                 url = _html.escape(x["link"], quote=True)
                 h += (f'<div class="nw">{tag}<a href="{url}" target="_blank" rel="noopener noreferrer">{_html.escape(x["title"][:110])}</a>'
                       f' <span class="sub">{_html.escape(x["source"])}, {ago(x["age_h"])}</span></div>')
-        else:
+        elif label != "Stock-specific":
             h += '<div class="sub">No fresh news found. Move may be market or sector driven.</div>'
     h += f'<div class="sub"><a href="{NSE_ANN}" target="_blank" rel="noopener noreferrer">NSE corporate announcements</a></div></div>'
     return h
@@ -1157,9 +1174,9 @@ def why_notes():
     with st.expander("ℹ️ How the move reason works", expanded=False):
         st.markdown("""
 Each top card compares the stock's move today with the **Nifty 50** and with its **sector peers** (the middle move of other stocks in the same sector in this scan):
-- **Market-driven:** the stock moved within about 1 point of the Nifty.
-- **Sector-driven:** its sector peers moved clearly the same way (1 point or more) and the stock is not far ahead of them.
-- **Stock-specific:** the stock beat the Nifty by 2 points or more and also beat its sector by at least 1 point.
+- **Market-driven:** the stock moved within 1 point of the Nifty.
+- **Sector-driven:** its sector is up strongly (2 points or more above the Nifty) and the stock is within 2 points of the sector, or a headline mentions a sector rally.
+- **Stock-specific:** the stock beat the Nifty by 3 points or more AND beat its sector peers by 2 points or more. If no relevant company news is found, it shows "Unconfirmed: check NSE announcements".
 - **Mixed signals:** none of the above fits.
 
 For the top stocks only, the latest headlines from the last 48 hours are read from Google News (then Yahoo Finance). Each headline gets a simple keyword tag, like Results or Order win. The one-line summary only says a **possible reason**, never a fact. Turn this off with the sidebar switch if the app feels slow.
