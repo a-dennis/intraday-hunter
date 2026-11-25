@@ -308,6 +308,7 @@ def score_stock(sym, d, P, side):
         "VWAP": round(p_vwap, 1), "Candle": round(float(p_can), 1),
         "Entry": round(entry, 2), "Stop": round(stop, 2), "Target": round(target, 2), "Qty": qty,
         "Risk/sh": round(risk, 2), "_last": t.index[-1], "_age": age,
+        "PrevClose": round(pc, 2), "PrevDate": prior_days[-1].strftime("%a %d %b"),
     }
 
 
@@ -537,6 +538,7 @@ Data is from Yahoo Finance and can be a few minutes late, so check your broker s
                 <div class="grid"><div>Price<b>{r.LTP:.2f}</b></div><div>Change<b>{r["Chg %"]:+.2f}%</b></div><div>Volume<b>{r.VolX:.1f}x</b></div>
                 <div>Entry<b>{r.Entry:.2f}</b></div><div>Stop<b>{r.Stop:.2f}</b></div><div>Target<b>{r.Target:.2f}</b></div></div>
                 <div class="sub">Shares for Rs {risk_amt:,} risk: <b>{int(r.Qty)}</b> (risk Rs {r["Risk/sh"]:.2f} per share, reward 2x)</div>
+                <div class="sub">Prev close: {r.PrevClose:.2f} ({r.PrevDate})</div>
                 <div class="chips">{chips}</div>{why.get(r.Symbol, "")}</div>"""
                 with cols[idx % 3]:
                     st.markdown(html, unsafe_allow_html=True)
@@ -839,7 +841,8 @@ def btst_score(sym, d, P, mood_pts):
     risk = buy - stop
     target = buy + 2 * risk
     qty = int(max(0, min(P["brisk"] // risk, P["capital"] * P["lev"] // buy))) if risk > 0 else 0
-    return {"Symbol": sym, "Close": round(float(close), 2), "Chg %": round(float(chg), 2), "VolX": round(vx, 2),
+    return {"Symbol": sym, "PrevClose": round(float(c[-2]), 2), "PrevDate": d.index[-2].strftime("%a %d %b"),
+            "Close": round(float(close), 2), "Chg %": round(float(chg), 2), "VolX": round(vx, 2),
             "Range %": round(float(pos * 100), 0), "Score": round(float(total), 1), "Label": label, "Breakout": brk_txt,
             "Close pts": round(p_close, 1), "Volume pts": round(p_vol, 1), "Break pts": round(p_brk, 1),
             "Trend pts": round(p_trend, 1), "Mood pts": mood_pts,
@@ -1359,6 +1362,7 @@ Only large liquid stocks above Rs 100 are scanned. Stocks with results due today
                 <div>Entry<b>{r.Buy:.2f}</b></div><div>Stop<b>{r.Stop:.2f}</b></div><div>Target<b>{r.Target:.2f}</b></div></div>
                 <div class="sub">Shares for Rs {brisk_amt:,} risk: <b>{int(r.Qty)}</b> (risk Rs {r["Risk/sh"]:.2f} per share, reward 2x)<br>
                 Sell in the first 30 to 60 minutes tomorrow, or at the stop.</div>
+                <div class="sub">Prev close: {r.PrevClose:.2f} ({r.PrevDate})</div>
                 {late_line}<div class="chips">{chips}</div>{why.get(r.Symbol, "")}</div>"""
                 with cols[idx % 3]:
                     st.markdown(html, unsafe_allow_html=True)
