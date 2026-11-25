@@ -685,6 +685,9 @@ def fetch_daily(symbols):
             continue
         for s, t in zip(part, tick):
             d = clean(raw, t, len(tick) > 1)
+            if d is not None:
+                d = d.dropna(subset=["Open", "High", "Low", "Close"]).copy()
+                d["Volume"] = d["Volume"].fillna(0)
             if d is not None and len(d) > 55:
                 out[s] = d
     return out
@@ -840,7 +843,7 @@ def btst_close(i, price, when):
     btst_save()
 
 
-def btst_body():
+def _btst_body():
     if "btst_journal" not in st.session_state:
         st.session_state.btst_journal = btst_load()
     st.markdown('<div class="warn"><b>BTST carries overnight risk.</b> News or global markets can make the stock open lower '
@@ -898,10 +901,16 @@ Only large liquid stocks above Rs 100 are scanned. Stocks with results due today
                 skipped.append(sym)
                 continue
             r = btst_score(sym, d, P2, mood_pts)
-            rows.append(r) if r else skipped.append(sym)
+            if r:
+                rows.append(r)
+            else:
+                skipped.append(sym)
         except Exception:
             skipped.append(sym)
-    df = pd.DataFrame(rows).sort_values("Score", ascending=False).reset_index(drop=True) if rows else pd.DataFrame()
+    if rows:
+        df = pd.DataFrame(rows).sort_values("Score", ascending=False).reset_index(drop=True)
+    else:
+        df = pd.DataFrame()
 
     # Skip stocks with results due (only checked for the best 20, to keep it fast)
     due = []
@@ -916,6 +925,9 @@ Only large liquid stocks above Rs 100 are scanned. Stocks with results due today
                                  now_ist().strftime("%H:%M:%S")],
                              ["Stocks scanned", "Passed liquidity filter", f"Score {btst_min}+", "Last updated (IST)"]):
         col.markdown(f'<div class="kpi"><b>{val}</b><span>{lab.upper()}</span></div>', unsafe_allow_html=True)
+    n_pass = len(df)
+    n_good = int((df.Score >= btst_min).sum()) if n_pass else 0
+    st.markdown(f"**Stocks scanned: {len(ddata)}, Passed basic filter: {n_pass}, Scored above minimum: {n_good}**")
     st.caption(f"{nifty_txt} · latest daily candle: {latest.strftime('%d %b %Y')}"
                + (f" · skipped, result due: {', '.join(due)}" if due else ""))
     n = now_ist()
@@ -943,7 +955,7 @@ Only large liquid stocks above Rs 100 are scanned. Stocks with results due today
                 <div class="bar"><i style="width:{min(r.Score, 100):.0f}%"></i></div>
                 <div class="sub"><span class="pill label" style="margin-left:0">{r.Label}</span> Closed at {r["Range %"]:.0f}% of day range · {r.Breakout}</div>
                 <div class="grid"><div>Close<b>{r.Close:.2f}</b></div><div>Change<b>{r["Chg %"]:+.2f}%</b></div><div>Volume<b>{r.VolX:.1f}x</b></div>
-                <div>Buy<b>{r.Buy:.2f}</b></div><div>Stop<b>{r.Stop:.2f}</b></div><div>Target<b>{r.Target:.2f}</b></div></div>
+                <div>Entry<b>{r.Buy:.2f}</b></div><div>Stop<b>{r.Stop:.2f}</b></div><div>Target<b>{r.Target:.2f}</b></div></div>
                 <div class="sub">Shares for Rs {brisk_amt:,} risk: <b>{int(r.Qty)}</b> (risk Rs {r["Risk/sh"]:.2f} per share, reward 2x)<br>
                 Sell in the first 30 to 60 minutes tomorrow, or at the stop.</div>
                 <div class="chips">{chips}</div></div>"""
@@ -1019,6 +1031,14 @@ Only large liquid stocks above Rs 100 are scanned. Stocks with results due today
             btst_save()
             st.rerun()
         st.caption("Streamlit Cloud can reset saved files when the app restarts. Download the BTST journal after each trade.")
+
+
+def btst_body():
+    """Safety wrapper: if the whole BTST scan fails, show a clear message instead of crashing or printing junk."""
+    try:
+        _btst_body()
+    except Exception as e:
+        st.error(f"The BTST scan failed: {type(e).__name__}: {e}. Press Refresh BTST data in a minute. The Intraday tab is not affected.")
 
 
 # Two main tabs. Intraday re-runs by itself during market hours; BTST refreshes with its button.
