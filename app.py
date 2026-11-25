@@ -724,6 +724,55 @@ def result_due(sym, today_str):
         return False
 
 
+def late_day(d5, chg):
+    """Late-day strength penalties from today's 5-minute candles. Returns None when 5-minute data is not usable."""
+    try:
+        if d5 is None or len(d5) < 25:
+            return None
+        day = d5.index[-1].date()
+        t = d5[[i.date() == day for i in d5.index]]
+        if len(t) < 13:
+            return None
+        c = t.Close.to_numpy(float)
+        h = t.High.to_numpy(float)
+        o = t.Open.to_numpy(float)
+        last = float(c[-1])
+        pen, notes = 0, []
+        vol = t.Volume.to_numpy(float)
+        typ = (t.High.to_numpy(float) + t.Low.to_numpy(float) + c) / 3
+        vwap = float((typ * vol).sum() / vol.sum()) if vol.sum() > 0 else float(typ.mean())
+        if last < vwap:
+            pen += 15
+            notes.append("below VWAP -15")
+        ma20 = float(d5.Close.to_numpy(float)[-20:].mean())
+        if last < ma20:
+            pen += 10
+            notes.append("below 5-min 20 MA -10")
+        h12 = h[-12:]
+        lower_highs = h12[:4].max() > h12[4:8].max() > h12[8:].max()
+        hour_down = c[-1] < o[-12]
+        if lower_highs or hour_down:
+            pen += 10
+            notes.append("last hour weak -10")
+        day_high = float(h.max())
+        off = (day_high - last) / day_high * 100 if day_high > 0 else 0.0
+        if off > 3:
+            pen += 20
+            notes.append(f"{off:.1f}% below day high -20")
+        elif off > 1.5:
+            pen += 10
+            notes.append(f"{off:.1f}% below day high -10")
+        ext = chg > 6
+        if ext:
+            pen += 5
+            notes.append("extended move -5")
+        core = pen - (5 if ext else 0)
+        tag = "Closing strong" if core == 0 else ("Fading" if core <= 20 else "Weak close")
+        return {"pen": pen, "tag": tag, "ext": ext, "notes": ", ".join(notes)}
+    except Exception:
+        return None
+
+
 def btst_score(sym, d, P, mood_pts):
     """Score one stock 0-100 on its daily candles. Returns None if it fails the light filter."""
     d = d.copy()
@@ -1181,6 +1230,7 @@ Best used between **2:30 PM and 3:25 PM IST**, when today's candle is almost fin
 - **Volume expansion (25):** today's volume versus the 20-day average. 1.5x = a little, 2x = medium, 3x or more = full. (Early in the day volume looks low because the day is not finished.)
 - **Breakout (25):** price is at or above the 20-day high (full points), broke it yesterday (20), broke it a few days ago and holds (10), or just cleared the last 5 days' high (12).
 - **Trend support (15):** price above the 20-day average (7.5) and the 50-day average (7.5).
+- **Late-day penalties (from 5-minute candles, taken off the score):** price below today's VWAP -15; below the 5-minute 20 average -10; last hour makes lower highs or closes below where it opened -10; more than 1.5% below the day high -10 (more than 3% -20); up more than 6% today -5 and tagged "Extended move". Card tag: **Closing strong** (no penalty), **Fading** (some), **Weak close** (heavy). If 5-minute data is missing for a stock, no penalty is applied and the card says so.
 - **Market mood (10):** the Nifty 50 is up today or above its 20-day average. If not, 0 points and a warning.
 
 Only large liquid stocks above Rs 100 are scanned. Stocks with results due today or tomorrow are skipped when Yahoo shows that date (it often does not for Indian stocks, so check news yourself).
@@ -1216,6 +1266,10 @@ Only large liquid stocks above Rs 100 are scanned. Stocks with results due today
         st.info("Nifty 50 data is not available right now, so market mood gets 0 points.")
 
     latest = max(d.index[-1] for d in ddata.values())
+    try:
+        d5all = fetch(tuple(BTST_UNIVERSE))
+    except Exception:
+        d5all = {}
     P2 = dict(bmin_price=bmin_price, bmin_vol=bmin_vol, brisk=brisk_amt, capital=capital, lev=lev)
     rows, skipped = [], []
     for sym, d in ddata.items():
@@ -1225,6 +1279,20 @@ Only large liquid stocks above Rs 100 are scanned. Stocks with results due today
                 continue
             r = btst_score(sym, d, P2, mood_pts)
             if r:
+                r["Base score"] = r["Score"]
+                r["Late pen"] = 0
+                r["Late tag"] = "No 5-min data"
+                r["Late notes"] = ""
+                r["Extended"] = False
+                d5 = d5all.get(sym)
+                if d5 is not None and len(d5) and d5.index[-1].date() == d.index[-1].date():
+                    ld = late_day(d5, r["Chg %"])
+                    if ld:
+                        r["Late pen"] = ld["pen"]
+                        r["Late tag"] = ld["tag"]
+                        r["Late notes"] = ld["notes"]
+                        r["Extended"] = ld["ext"]
+                        r["Score"] = round(max(0.0, r["Score"] - ld["pen"]), 1)
                 rows.append(r)
             else:
                 skipped.append(sym)
@@ -1275,14 +1343,23 @@ Only large liquid stocks above Rs 100 are scanned. Stocks with results due today
                 chips = "".join(f"<span>{nm} {v:.0f}/{mx}</span>" for nm, v, mx in
                                 [("Close", r["Close pts"], 25), ("Volume", r["Volume pts"], 25), ("Breakout", r["Break pts"], 25),
                                  ("Trend", r["Trend pts"], 15), ("Mood", r["Mood pts"], 10)])
+                late_pills = ""
+                if r["Late tag"] != "No 5-min data":
+                    late_pills = f'<span class="pill label">{r["Late tag"]}</span>'
+                if r["Extended"]:
+                    late_pills += '<span class="pill label">Extended move</span>'
+                late_line = ""
+                if r["Late tag"] != "No 5-min data":
+                    late_line = (f'<div class="sub">Late-day penalty: <b>{("-" + str(int(r["Late pen"]))) if r["Late pen"] else "0"}</b> (score before penalty {r["Base score"]:.0f})'
+                                 + (f' · {r["Late notes"]}' if r["Late notes"] else "") + '</div>')
                 html = f"""<div class="pick long"><h3>#{idx + 1} {r.Symbol}<span class="pill score">{r.Score:.0f}/100</span></h3>
                 <div class="bar"><i style="width:{min(r.Score, 100):.0f}%"></i></div>
-                <div class="sub"><span class="pill label" style="margin-left:0">{r.Label}</span> Closed at {r["Range %"]:.0f}% of day range · {r.Breakout}</div>
+                <div class="sub"><span class="pill label" style="margin-left:0">{r.Label}</span>{late_pills} Closed at {r["Range %"]:.0f}% of day range · {r.Breakout}</div>
                 <div class="grid"><div>Close<b>{r.Close:.2f}</b></div><div>Change<b>{r["Chg %"]:+.2f}%</b></div><div>Volume<b>{r.VolX:.1f}x</b></div>
                 <div>Entry<b>{r.Buy:.2f}</b></div><div>Stop<b>{r.Stop:.2f}</b></div><div>Target<b>{r.Target:.2f}</b></div></div>
                 <div class="sub">Shares for Rs {brisk_amt:,} risk: <b>{int(r.Qty)}</b> (risk Rs {r["Risk/sh"]:.2f} per share, reward 2x)<br>
                 Sell in the first 30 to 60 minutes tomorrow, or at the stop.</div>
-                <div class="chips">{chips}</div>{why.get(r.Symbol, "")}</div>"""
+                {late_line}<div class="chips">{chips}</div>{why.get(r.Symbol, "")}</div>"""
                 with cols[idx % 3]:
                     st.markdown(html, unsafe_allow_html=True)
                     if st.button("Paper trade this BTST", key=f"bt_{r.Symbol}_{idx}"):
@@ -1297,7 +1374,7 @@ Only large liquid stocks above Rs 100 are scanned. Stocks with results due today
             st.caption("Score is for ranking only. It is not a chance of winning. A gap down overnight can skip right past your stop.")
             why_notes()
             with st.expander("All scores"):
-                show = ["Symbol", "Score", "Label", "Close", "Chg %", "VolX", "Range %", "Breakout",
+                show = ["Symbol", "Score", "Base score", "Late pen", "Late tag", "Label", "Close", "Chg %", "VolX", "Range %", "Breakout",
                         "Close pts", "Volume pts", "Break pts", "Trend pts", "Mood pts"]
                 st.dataframe(df[show], hide_index=True, width="stretch")
                 if skipped:
