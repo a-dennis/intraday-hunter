@@ -1085,6 +1085,23 @@ def pct_change_map(data, kind):
     return out
 
 
+def shared_sector_pcts(extra_syms=()):
+    """ONE source for the sector peer check on every tab: daily candles, the full peer list in SECTORS,
+    today's close vs the previous close. Returns {symbol: % change}."""
+    base = tuple(sorted(set(SECTOR_OF) | set(BTST_UNIVERSE)))
+    try:
+        dd = dict(fetch_daily(base))
+    except Exception:
+        dd = {}
+    miss = tuple(sorted(set(extra_syms) - set(dd)))
+    if miss:
+        try:
+            dd.update(fetch_daily(miss))
+        except Exception:
+            pass
+    return pct_change_map(dd, "daily")
+
+
 def nifty_pct():
     try:
         n = fetch_nifty()
@@ -1151,6 +1168,14 @@ def classify(c, n, s, news=None, sec=None):
     return "Mixed signals"
 
 
+_WEAK_NEWS = re.compile(r"open interest|\bOI\b|volume|technical|trader analysis|\bcharts?\b|support and resistance|RSI|moving average", re.I)
+
+
+def _is_weak_news(t):
+    """True for headlines about open interest, volume or technical analysis (not a company event)."""
+    return bool(_WEAK_NEWS.search(t or ""))
+
+
 def why_html(sym, c, n, s, sec, news, show_news=True):
     label = classify(c, n, s, news, sec)
     nums = [f"Stock {c:+.1f}%"]
@@ -1164,8 +1189,11 @@ def why_html(sym, c, n, s, sec, news, show_news=True):
         sm = sector_market_headline(news, sec, label)
         if sm:
             extra = f'<div class="sub">Reason: {_html.escape(sm["title"][:90])} ({ago(sm["age_h"])})</div>'
+    elif label == "Stock-specific" and news and all(_is_weak_news(x["title"]) for x in news):
+        summary = "Unconfirmed: check NSE announcements"
     elif news:
-        top = next((x for x in news if x["tag"]), news[0])
+        pool = [x for x in news if not _is_weak_news(x["title"])] if label == "Stock-specific" else news
+        top = next((x for x in pool if x["tag"]), pool[0])
         reason = top["tag"] or _html.escape(top["title"][:70])
         reason = f"{reason} headline ({ago(top['age_h'])})" if top["tag"] else f"{reason} ({ago(top['age_h'])})"
         summary = f"{label} move. Possible reason: {reason}."
@@ -1195,8 +1223,8 @@ def why_map(top, data, kind):
         return {}
     try:
         n = nifty_pct()
-        pmap = pct_change_map(data, kind)
         syms = list(top.Symbol)
+        pmap = shared_sector_pcts(syms)
         news = {}
         try:
             with ThreadPoolExecutor(max_workers=5) as ex:
@@ -1212,7 +1240,8 @@ def why_map(top, data, kind):
         for _, r in top.iterrows():
             try:
                 sp, sec = sector_pct(r.Symbol, pmap)
-                out[r.Symbol] = why_html(r.Symbol, float(r["Chg %"]), n, sp, sec, news.get(r.Symbol, []))
+                chg = pmap.get(r.Symbol, float(r["Chg %"]))
+                out[r.Symbol] = why_html(r.Symbol, chg, n, sp, sec, news.get(r.Symbol, []))
             except Exception:
                 continue
         return out
@@ -1228,7 +1257,7 @@ def why_notes():
                "and company results dates before taking a trade.")
     with st.expander("ℹ️ How the move reason works", expanded=False):
         st.markdown("""
-Each top card compares the stock's move today with the **Nifty 50** and with its **sector peers** (the middle move of other stocks in the same sector in this scan):
+Each top card compares the stock's move today with the **Nifty 50** and with its **sector peers** (the middle move of other stocks in the same sector, from one shared calculation on daily prices, so both tabs show the same number):
 - **Market-driven:** the stock moved within 1 point of the Nifty.
 - **Sector-driven:** its sector is up strongly (2 points or more above the Nifty) and the stock is within 2 points of the sector, or a headline mentions a sector rally.
 - **Stock-specific:** the stock beat the Nifty by 3 points or more AND beat its sector peers by 2 points or more. If no relevant company news is found, it shows "Unconfirmed: check NSE announcements".
