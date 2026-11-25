@@ -913,16 +913,52 @@ NAMES = {
     "RBLBANK": "RBL Bank", "BANDHANBNK": "Bandhan Bank", "IDEA": "Vodafone Idea", "TATACOMM": "Tata Communications", "PATANJALI": "Patanjali Foods",
 }
 
-# keyword -> label (simple matching, first match wins)
+# keyword -> label (simple matching, first match wins). A pattern can also be a function(title_lower) -> bool.
+_RES_WORD = r"\b(results?|earnings|quarterly (net )?(profit|loss)|net (profit|loss)|profit after tax|q[1-4]( ?fy ?\d{2,4})?( (numbers|profit|loss|net|revenue|earnings|results?))?)\b"
+_RES_DONE = r"\b(announce[sd]?|report(s|ed)?|post(s|ed)?|declare[sd]?|clock(s|ed)?|logs?|logged|record(s|ed)?|beats?|misses?|swings? to|turns? to|rises?|rose|jumps?|jumped|falls?|fell|dips?|dipped|slumps?|slumped|surges?|surged|declines?|declined|grows?|grew|soars?|drops?|dropped)\b"
+_RES_FUTURE = r"\b(to|will|may|set to|likely to|scheduled to|expected to|ahead of|date|preview|what to expect|board meeting|technical|trader|analysis|readings?)\b"
+
+
+def _is_results(t):
+    if not (re.search(_RES_WORD, t) and re.search(_RES_DONE, t)):
+        return False
+    if re.search(r"\b(to|will|may|set to|likely to|scheduled to|expected to)\s+(announce|report|post|declare)", t):
+        return False
+    if re.search(r"ahead of|preview|what to expect|results? date|board meeting|technical|trader|readings?", t):
+        return False
+    return True
+
+
+def _is_regulatory(t):
+    if re.search(r"\bncds?\b|non-?convertible|debentures?|\bbonds?\b|allot|trading window", t):
+        return False
+    if re.search(r"show[- ]cause|\bfraud|\braid(s|ed)?\b|\bprobe[sd]?\b|\bpenalt(y|ies)\b|\bfined?\b|investigation|\bcbi\b|enforcement directorate|\bed (raid|probe|summons)", t):
+        return True
+    if re.search(r"\bsebi\b.{0,50}\b(notice|order|probe|penalty|fine[sd]?|action|bars?|barred|ban(s|ned)?|investigat\w*|summons)\b", t):
+        return True
+    if re.search(r"\b(notice|order|probe|penalty|fine[sd]?|action)\b.{0,30}\bsebi\b", t):
+        return True
+    return False
+
+
+def _is_downgrade(t):
+    if re.search(r"crisil|icra|care ratings|india ratings|moody|fitch|s&p|credit rating|rating agency", t):
+        return False
+    return bool(re.search(
+        r"\bdowngrade[sd]?\b|\b(cuts?|lowers?|slash(es|ed)?|trims?|reduces?)\b.{0,20}\b(target|price target|tp|rating)\b"
+        r"|\btarget( price)?\b.{0,15}\b(cut|slashed|lowered|reduced)\b|\b(sell|reduce|underperform|underweight) (rating|call)\b"
+        r"|\bto (sell|reduce|underperform|underweight)\b", t))
+
+
 TAGS = [
-    ("Results/Earnings", r"result|earnings|q[1-4]\b|quarter|profit|net income|revenue|ebitda"),
+    ("Results/Earnings", _is_results),
     ("Order win/Contract", r"order|contract|bags|wins|secures|awarded|deal worth"),
     ("Upgrade/Target price", r"upgrade|target price|raises target|buy rating|initiates coverage|outperform|overweight"),
-    ("Downgrade", r"downgrade|cuts target|sell rating|underperform|underweight"),
+    ("Downgrade", _is_downgrade),
     ("Block/Bulk deal", r"block deal|bulk deal|stake sale|offloads|picks up stake"),
     ("Dividend/Bonus/Split", r"dividend|bonus|stock split|record date|buyback"),
     ("Acquisition/Merger", r"acqui|merger|takeover|buys stake|demerger"),
-    ("Regulatory/Fraud/Probe", r"sebi|probe|fraud|penalty|raid|investigation|notice|ed |cbi|ban\b"),
+    ("Regulatory/Fraud/Probe", _is_regulatory),
     ("Management change", r"resign|appoints|appointed|steps down|new ceo|new md|cfo|chairman"),
 ]
 
@@ -934,7 +970,7 @@ NEWS_TTL = 600  # cache news for 10 minutes
 def tag_headline(title):
     t = title.lower()
     for label, pat in TAGS:
-        if re.search(pat, t):
+        if (pat(t) if callable(pat) else re.search(pat, t)):
             return label
     return ""
 
@@ -1084,6 +1120,21 @@ def sector_rally_news(news, sec):
     return False
 
 
+_MKT_NEWS = re.compile(r"(nifty|sensex|market|markets|dalal street|equities|indices)\W.{0,60}(rally|rallies|rallied|surge|surges|surged|jump|jumps|jumped|gain|gains|soar|soars|soared|climb|climbs|tumble|tumbles|crash|fall|falls|slump|slumps|sink|sinks|drop|drops)", re.I)
+
+
+def sector_market_headline(news, sec, label):
+    """A fetched headline about the sector (Sector-driven) or the market (Market-driven), or None."""
+    for x in news or []:
+        t = x.get("title", "")
+        if label == "Sector-driven":
+            if _RALLY.search(t) or (sec and re.search(re.escape(sec.split()[0]) + r".{0,25}(stocks|shares|index|sector).{0,40}(rally|rallies|rallied|surge|surges|surged|soar|soars|soared|jump|jumps|jumped|gain|gains)", t, re.I)):
+                return x
+        elif _MKT_NEWS.search(t):
+            return x
+    return None
+
+
 def classify(c, n, s, news=None, sec=None):
     """Market-driven / Sector-driven / Stock-specific. d = +1 for an up move, -1 for a down move."""
     if n is None:
@@ -1107,19 +1158,23 @@ def why_html(sym, c, n, s, sec, news, show_news=True):
         nums.append(f"Nifty {n:+.1f}%")
     if s is not None:
         nums.append(f"{sec} peers {s:+.1f}%")
-    if news:
+    extra = ""
+    if label in ("Sector-driven", "Market-driven"):
+        summary = "No stock-specific news found. Move follows the sector/market."
+        sm = sector_market_headline(news, sec, label)
+        if sm:
+            extra = f'<div class="sub">Reason: {_html.escape(sm["title"][:90])} ({ago(sm["age_h"])})</div>'
+    elif news:
         top = next((x for x in news if x["tag"]), news[0])
         reason = top["tag"] or _html.escape(top["title"][:70])
         reason = f"{reason} headline ({ago(top['age_h'])})" if top["tag"] else f"{reason} ({ago(top['age_h'])})"
         summary = f"{label} move. Possible reason: {reason}."
     elif label == "Stock-specific":
         summary = "Unconfirmed: check NSE announcements"
-    elif label in ("Market-driven", "Sector-driven"):
-        summary = f"{label} move. No fresh news found."
     else:
         summary = "No clear driver found. No fresh news found." if show_news else "No clear driver found."
     h = f'<div class="why"><b>Why is it moving?</b> <span class="pill label" style="margin-left:4px">{label}</span>'
-    h += f'<div class="sub">{" | ".join(nums)}</div><div>{summary}</div>'
+    h += f'<div class="sub">{" | ".join(nums)}</div><div>{summary}</div>{extra}'
     if show_news:
         if news:
             for x in news:
@@ -1127,7 +1182,7 @@ def why_html(sym, c, n, s, sec, news, show_news=True):
                 url = _html.escape(x["link"], quote=True)
                 h += (f'<div class="nw">{tag}<a href="{url}" target="_blank" rel="noopener noreferrer">{_html.escape(x["title"][:110])}</a>'
                       f' <span class="sub">{_html.escape(x["source"])}, {ago(x["age_h"])}</span></div>')
-        elif label != "Stock-specific":
+        elif label not in ("Stock-specific", "Sector-driven", "Market-driven"):
             h += '<div class="sub">No fresh news found. Move may be market or sector driven.</div>'
     h += f'<div class="sub"><a href="{NSE_ANN}" target="_blank" rel="noopener noreferrer">NSE corporate announcements</a></div></div>'
     return h
