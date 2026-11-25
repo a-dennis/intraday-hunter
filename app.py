@@ -73,6 +73,7 @@ st.markdown("""
 .note{border-left:4px solid #1c7ed6;background:rgba(28,126,214,.08);padding:10px 14px;border-radius:8px;font-size:14px;margin:8px 0}
 .pill.label{background:#1c7ed6}.pill.score{background:#14a44d}
 .bar{height:7px;border-radius:5px;background:rgba(128,128,128,.2);margin:6px 0 2px}.bar i{display:block;height:7px;border-radius:5px;background:linear-gradient(90deg,#1d6a7a,#14a44d)}
+.why{margin-top:8px;padding:8px 10px;border-radius:10px;background:rgba(28,126,214,.08);font-size:12.5px}.why .nw{margin-top:4px}.why .tg{background:rgba(240,140,0,.2);border-radius:6px;padding:0 5px;font-size:11px;font-style:normal}.why a{color:inherit}
 </style>
 """, unsafe_allow_html=True)
 
@@ -433,6 +434,7 @@ with st.sidebar:
     btst_min = st.slider("Minimum score (BTST)", 0, 100, 50, 5)
     brisk_amt = st.number_input("Risk per BTST trade (Rs)", 50, 100000, 500, 50)
     auto = st.checkbox("Auto refresh during market hours", True)
+    show_why = st.checkbox("Show news and move reason", True)
     every = st.selectbox("Refresh every", ["1 minute", "2 minutes"], index=1)
     if st.button("Refresh now", width="stretch"):
         st.cache_data.clear()
@@ -521,6 +523,7 @@ Data is from Yahoo Finance and can be a few minutes late, so check your broker s
             else:
                 top = df.head(5)
                 st.markdown('<div class="warn">Quiet market, showing best available.</div>', unsafe_allow_html=True)
+            why = why_map(top, data, "intraday")
             cols = st.columns(3)
             for idx, (_, r) in enumerate(top.iterrows()):
                 cls = "long" if r.Side == "LONG" else "short"
@@ -534,7 +537,7 @@ Data is from Yahoo Finance and can be a few minutes late, so check your broker s
                 <div class="grid"><div>Price<b>{r.LTP:.2f}</b></div><div>Change<b>{r["Chg %"]:+.2f}%</b></div><div>Volume<b>{r.VolX:.1f}x</b></div>
                 <div>Entry<b>{r.Entry:.2f}</b></div><div>Stop<b>{r.Stop:.2f}</b></div><div>Target<b>{r.Target:.2f}</b></div></div>
                 <div class="sub">Shares for Rs {risk_amt:,} risk: <b>{int(r.Qty)}</b> (risk Rs {r["Risk/sh"]:.2f} per share, reward 2x)</div>
-                <div class="chips">{chips}</div></div>"""
+                <div class="chips">{chips}</div>{why.get(r.Symbol, "")}</div>"""
                 with cols[idx % 3]:
                     st.markdown(html, unsafe_allow_html=True)
                     if st.button("Paper trade this", key=f"pt_{r.Symbol}_{idx}"):
@@ -547,6 +550,7 @@ Data is from Yahoo Finance and can be a few minutes late, so check your broker s
                             add_trade(r.to_dict(), r.Label, "")
                             st.success("Saved. See the Paper trades tab.")
             st.caption("Score is for ranking only. It is not a chance of winning. Where the price has already moved past the level, entry is the current price.")
+            why_notes()
 
     # -------------------------------------------------------- all scores
     with tabs[1]:
@@ -794,6 +798,322 @@ def btst_score(sym, d, P, mood_pts):
             "Qty": qty, "Risk/sh": round(float(risk), 2), "_date": d.index[-1].strftime("%Y-%m-%d")}
 
 
+# ============================================================ "WHY IS IT MOVING?" (market vs stock check + news)
+# Part 1 compares the stock with the Nifty and with its sector peers. Part 2 reads free public headlines.
+# Everything here is wrapped so a failure only hides the section; the card itself always loads.
+import html as _html
+import re
+import threading
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
+from email.utils import parsedate_to_datetime
+from datetime import timezone
+
+NSE_ANN = "https://www.nseindia.com/companies-listing/corporate-filings-announcements"
+
+# Peer groups (used for the sector check). A stock not listed here simply skips the sector part.
+SECTORS = {
+    "Bank": "HDFCBANK ICICIBANK SBIN KOTAKBANK AXISBANK INDUSINDBK PNB BANKBARODA CANBK FEDERALBNK AUBANK IDFCFIRSTB BANDHANBNK UNIONBANK INDIANB RBLBANK YESBANK",
+    "IT": "TCS INFY HCLTECH WIPRO TECHM LTIM PERSISTENT COFORGE MPHASIS OFSS KPITTECH TATAELXSI LTTS",
+    "FMCG": "HINDUNILVR ITC NESTLEIND BRITANNIA DABUR GODREJCP MARICO COLPAL TATACONSUM VBL UBL PGHH PATANJALI",
+    "Auto": "MARUTI M&M BAJAJ-AUTO EICHERMOT HEROMOTOCO TVSMOTOR ASHOKLEY TATAMOTORS BALKRISIND MRF BOSCHLTD MOTHERSON",
+    "Pharma": "SUNPHARMA CIPLA DRREDDY LUPIN AUROPHARMA ZYDUSLIFE TORNTPHARM DIVISLAB ALKEM MANKIND BIOCON GLENMARK LAURUSLABS",
+    "Metal": "TATASTEEL JSWSTEEL HINDALCO VEDL JINDALSTEL SAIL NMDC NATIONALUM HINDZINC APLAPOLLO JSL",
+    "Energy": "RELIANCE ONGC BPCL IOC GAIL COALINDIA NTPC POWERGRID TATAPOWER ADANIPOWER ADANIGREEN NHPC JSWENERGY OIL HINDPETRO PETRONET",
+    "Finance": "BAJFINANCE BAJAJFINSV SHRIRAMFIN CHOLAFIN MUTHOOTFIN RECLTD PFC SBILIFE HDFCLIFE ICICIGI ICICIPRULI HDFCAMC SBICARD LICI JIOFIN",
+    "Realty": "DLF LODHA GODREJPROP OBEROIRLTY PRESTIGE PHOENIXLTD BRIGADE",
+    "Capital goods": "LT SIEMENS ABB CGPOWER POLYCAB HAVELLS BHEL CUMMINS BEL HAL BDL MAZDOCK COCHINSHIP VOLTAS DIXON",
+}
+SECTOR_OF = {s: sec for sec, names in SECTORS.items() for s in names.split()}
+
+NAMES = {
+    "RELIANCE": "Reliance Industries", "TCS": "TCS Tata Consultancy", "HDFCBANK": "HDFC Bank", "ICICIBANK": "ICICI Bank",
+    "INFY": "Infosys", "BHARTIARTL": "Bharti Airtel", "ITC": "ITC Ltd", "SBIN": "State Bank of India", "LT": "Larsen & Toubro",
+    "KOTAKBANK": "Kotak Mahindra Bank", "HINDUNILVR": "Hindustan Unilever", "AXISBANK": "Axis Bank", "BAJFINANCE": "Bajaj Finance",
+    "ASIANPAINT": "Asian Paints", "MARUTI": "Maruti Suzuki", "SUNPHARMA": "Sun Pharma", "TITAN": "Titan Company",
+    "ULTRACEMCO": "UltraTech Cement", "NTPC": "NTPC", "ONGC": "ONGC", "POWERGRID": "Power Grid", "TATASTEEL": "Tata Steel",
+    "JSWSTEEL": "JSW Steel", "HCLTECH": "HCL Technologies", "WIPRO": "Wipro", "TECHM": "Tech Mahindra", "ADANIPORTS": "Adani Ports",
+    "COALINDIA": "Coal India", "BAJAJFINSV": "Bajaj Finserv", "NESTLEIND": "Nestle India", "GRASIM": "Grasim", "HINDALCO": "Hindalco",
+    "CIPLA": "Cipla", "DRREDDY": "Dr Reddys", "EICHERMOT": "Eicher Motors", "BPCL": "BPCL", "HEROMOTOCO": "Hero MotoCorp",
+    "INDUSINDBK": "IndusInd Bank", "TATACONSUM": "Tata Consumer", "APOLLOHOSP": "Apollo Hospitals", "SBILIFE": "SBI Life",
+    "HDFCLIFE": "HDFC Life", "BRITANNIA": "Britannia", "DIVISLAB": "Divis Laboratories", "SHRIRAMFIN": "Shriram Finance",
+    "TRENT": "Trent", "BEL": "Bharat Electronics", "PNB": "Punjab National Bank", "BANKBARODA": "Bank of Baroda", "CANBK": "Canara Bank",
+    "IOC": "Indian Oil", "GAIL": "GAIL India", "VEDL": "Vedanta", "DLF": "DLF", "HAL": "Hindustan Aeronautics", "RECLTD": "REC Ltd",
+    "PFC": "Power Finance Corporation", "SAIL": "SAIL Steel Authority", "NMDC": "NMDC", "IDFCFIRSTB": "IDFC First Bank",
+    "M&M": "Mahindra & Mahindra", "BAJAJ-AUTO": "Bajaj Auto", "TATAMOTORS": "Tata Motors", "ADANIENT": "Adani Enterprises",
+    "ADANIPOWER": "Adani Power", "ADANIGREEN": "Adani Green", "AMBUJACEM": "Ambuja Cements", "DABUR": "Dabur", "GODREJCP": "Godrej Consumer",
+    "MARICO": "Marico", "PIDILITIND": "Pidilite", "HAVELLS": "Havells", "SIEMENS": "Siemens India", "ABB": "ABB India",
+    "CGPOWER": "CG Power", "POLYCAB": "Polycab", "BHARATFORG": "Bharat Forge", "MOTHERSON": "Samvardhana Motherson",
+    "BOSCHLTD": "Bosch Ltd", "ASHOKLEY": "Ashok Leyland", "TVSMOTOR": "TVS Motor", "JINDALSTEL": "Jindal Steel", "JSWENERGY": "JSW Energy",
+    "TATAPOWER": "Tata Power", "NHPC": "NHPC", "LUPIN": "Lupin", "AUROPHARMA": "Aurobindo Pharma", "ZYDUSLIFE": "Zydus Lifesciences",
+    "TORNTPHARM": "Torrent Pharma", "MAXHEALTH": "Max Healthcare", "PERSISTENT": "Persistent Systems", "COFORGE": "Coforge",
+    "MPHASIS": "Mphasis", "LTIM": "LTIMindtree", "FEDERALBNK": "Federal Bank", "AUBANK": "AU Small Finance Bank", "CHOLAFIN": "Chola Finance",
+    "MUTHOOTFIN": "Muthoot Finance", "HDFCAMC": "HDFC AMC", "ICICIGI": "ICICI Lombard", "ICICIPRULI": "ICICI Prudential Life",
+    "LICI": "LIC India", "JIOFIN": "Jio Financial", "SBICARD": "SBI Cards", "ZOMATO": "Zomato", "ETERNAL": "Eternal Zomato", "DMART": "DMart Avenue Supermarts",
+    "VBL": "Varun Beverages", "UNITDSPR": "United Spirits", "INDIGO": "InterGlobe IndiGo", "IRCTC": "IRCTC", "IRFC": "IRFC",
+    "LODHA": "Lodha Macrotech", "GODREJPROP": "Godrej Properties", "OBEROIRLTY": "Oberoi Realty", "UPL": "UPL", "SRF": "SRF",
+    "PIIND": "PI Industries", "NAUKRI": "Info Edge Naukri", "MAZDOCK": "Mazagon Dock", "COCHINSHIP": "Cochin Shipyard", "BDL": "Bharat Dynamics",
+    "BHEL": "BHEL", "CUMMINS": "Cummins India", "VOLTAS": "Voltas", "DIXON": "Dixon Technologies", "UNIONBANK": "Union Bank of India",
+    "INDIANB": "Indian Bank", "JUBLFOOD": "Jubilant FoodWorks", "KALYANKJIL": "Kalyan Jewellers", "PAYTM": "Paytm One97", "NYKAA": "Nykaa FSN",
+    "TATAELXSI": "Tata Elxsi", "OFSS": "Oracle Financial Services", "ABCAPITAL": "Aditya Birla Capital", "YESBANK": "Yes Bank",
+    "RBLBANK": "RBL Bank", "BANDHANBNK": "Bandhan Bank", "IDEA": "Vodafone Idea", "TATACOMM": "Tata Communications", "PATANJALI": "Patanjali Foods",
+}
+
+# keyword -> label (simple matching, first match wins)
+TAGS = [
+    ("Results/Earnings", r"result|earnings|q[1-4]\b|quarter|profit|net income|revenue|ebitda"),
+    ("Order win/Contract", r"order|contract|bags|wins|secures|awarded|deal worth"),
+    ("Upgrade/Target price", r"upgrade|target price|raises target|buy rating|initiates coverage|outperform|overweight"),
+    ("Downgrade", r"downgrade|cuts target|sell rating|underperform|underweight"),
+    ("Block/Bulk deal", r"block deal|bulk deal|stake sale|offloads|picks up stake"),
+    ("Dividend/Bonus/Split", r"dividend|bonus|stock split|record date|buyback"),
+    ("Acquisition/Merger", r"acqui|merger|takeover|buys stake|demerger"),
+    ("Regulatory/Fraud/Probe", r"sebi|probe|fraud|penalty|raid|investigation|notice|ed |cbi|ban\b"),
+    ("Management change", r"resign|appoints|appointed|steps down|new ceo|new md|cfo|chairman"),
+]
+
+_NEWS_CACHE = {}
+_NEWS_LOCK = threading.Lock()
+NEWS_TTL = 600  # cache news for 10 minutes
+
+
+def tag_headline(title):
+    t = title.lower()
+    for label, pat in TAGS:
+        if re.search(pat, t):
+            return label
+    return ""
+
+
+def _http_get(url, timeout=5):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; IntradayHunter/3)"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _relevant(title, sym, name):
+    t = title.lower()
+    first = name.split()[0].lower() if name else ""
+    return (len(first) >= 3 and first in t) or sym.lower() in t
+
+
+def _google_news(sym, name):
+    q = f'"{name}" (NSE OR share OR stock) when:2d'
+    url = "https://news.google.com/rss/search?" + urllib.parse.urlencode({"q": q, "hl": "en-IN", "gl": "IN", "ceid": "IN:en"})
+    root = ET.fromstring(_http_get(url))
+    out = []
+    for it in root.iter("item"):
+        title = (it.findtext("title") or "").strip()
+        src = (it.findtext("source") or "").strip()
+        if src and title.endswith(" - " + src):
+            title = title[: -len(src) - 3]
+        pub = it.findtext("pubDate")
+        when = parsedate_to_datetime(pub).astimezone(timezone.utc) if pub else None
+        if title and when is not None and _relevant(title, sym, name):
+            out.append({"title": title, "link": it.findtext("link") or "", "source": src or "Google News", "when": when})
+    return out
+
+
+def _yahoo_news(sym, name):
+    items = yf.Ticker(sym + ".NS").news or []
+    out = []
+    for it in items:
+        c = it.get("content") or it
+        title = (c.get("title") or "").strip()
+        link = ((c.get("canonicalUrl") or {}).get("url") or (c.get("clickThroughUrl") or {}).get("url") or c.get("link") or "")
+        src = (c.get("provider") or {}).get("displayName") or c.get("publisher") or "Yahoo Finance"
+        pub = c.get("pubDate") or c.get("displayTime")
+        if pub:
+            when = pd.Timestamp(pub).tz_convert("UTC") if pd.Timestamp(pub).tzinfo else pd.Timestamp(pub, tz="UTC")
+        elif c.get("providerPublishTime"):
+            when = pd.Timestamp(int(c["providerPublishTime"]), unit="s", tz="UTC")
+        else:
+            continue
+        if title:
+            out.append({"title": title, "link": link, "source": src, "when": when.to_pydatetime()})
+    return out
+
+
+def get_news(sym):
+    """Top 3 headlines from the last 48 hours. Google News first, then Yahoo. Any failure is skipped silently.
+    Results are cached for 10 minutes. Runs in worker threads, so it does not use st.* calls."""
+    now = _time.time()
+    with _NEWS_LOCK:
+        hit = _NEWS_CACHE.get(sym)
+        if hit and now - hit[0] < NEWS_TTL:
+            return hit[1]
+    name = NAMES.get(sym, sym)
+    items = []
+    for fn in (_google_news, _yahoo_news):
+        try:
+            items = fn(sym, name)
+        except Exception:
+            items = []
+        cutoff = datetime.now(timezone.utc).timestamp() - 48 * 3600
+        items = [i for i in items if i["when"].timestamp() >= cutoff]
+        if items:
+            break
+    items.sort(key=lambda i: i["when"], reverse=True)
+    seen, res = set(), []
+    for i in items:
+        key = i["title"].lower()[:60]
+        if key in seen:
+            continue
+        seen.add(key)
+        age_h = (datetime.now(timezone.utc).timestamp() - i["when"].timestamp()) / 3600
+        res.append({"title": i["title"], "link": i["link"], "source": i["source"], "age_h": max(age_h, 0),
+                    "tag": tag_headline(i["title"])})
+        if len(res) == 3:
+            break
+    with _NEWS_LOCK:
+        _NEWS_CACHE[sym] = (now, res)
+    return res
+
+
+def ago(h):
+    if h < 1:
+        return f"{max(int(h * 60), 1)}m ago"
+    if h < 48:
+        return f"{int(h)}h ago"
+    return f"{int(h // 24)}d ago"
+
+
+def pct_change_map(data, kind):
+    """Today's % change for every loaded stock (used for the sector peer check)."""
+    out = {}
+    for sym, d in data.items():
+        try:
+            if kind == "daily":
+                c = d.Close.to_numpy(float)
+                out[sym] = (c[-1] / c[-2] - 1) * 100
+            else:
+                days = d.index.date
+                prev = d.Close[days != days[-1]]
+                out[sym] = (float(d.Close.iloc[-1]) / float(prev.iloc[-1]) - 1) * 100
+        except Exception:
+            continue
+    return out
+
+
+def nifty_pct():
+    try:
+        n = fetch_nifty()
+        c = n.Close.to_numpy(float)
+        return float((c[-1] / c[-2] - 1) * 100)
+    except Exception:
+        return None
+
+
+def sector_pct(sym, pmap):
+    """Median % change of the other stocks in the same sector (needs at least 2 peers)."""
+    sec = SECTOR_OF.get(sym)
+    if not sec:
+        return None, None
+    peers = [pmap[p] for p in SECTORS[sec].split() if p != sym and p in pmap]
+    if len(peers) < 2:
+        return None, None
+    return float(np.median(peers)), sec
+
+
+def classify(c, n, s):
+    """Market-driven / Sector-driven / Stock-specific. d = +1 for an up move, -1 for a down move."""
+    if n is None:
+        return "Mixed signals"
+    d = 1 if c >= 0 else -1
+    if abs(c - n) <= 1.0:
+        return "Market-driven"
+    if s is not None and d * s >= 1.0 and d * (c - s) < 1.0:
+        return "Sector-driven"
+    if d * (c - n) >= 2.0 and (s is None or d * (c - s) >= 1.0):
+        return "Stock-specific"
+    return "Mixed signals"
+
+
+def why_html(sym, c, n, s, sec, news, show_news=True):
+    label = classify(c, n, s)
+    nums = [f"Stock {c:+.1f}%"]
+    if n is not None:
+        nums.append(f"Nifty {n:+.1f}%")
+    if s is not None:
+        nums.append(f"{sec} peers {s:+.1f}%")
+    if news:
+        top = next((x for x in news if x["tag"]), news[0])
+        reason = top["tag"] or _html.escape(top["title"][:70])
+        reason = f"{reason} headline ({ago(top['age_h'])})" if top["tag"] else f"{reason} ({ago(top['age_h'])})"
+        summary = f"{label} move. Possible reason: {reason}."
+    elif label == "Stock-specific":
+        summary = "Stock-specific move, but no news found. Check NSE announcements before trading."
+    elif label in ("Market-driven", "Sector-driven"):
+        summary = f"{label} move. No fresh news found."
+    else:
+        summary = "No clear driver found. No fresh news found." if show_news else "No clear driver found."
+    h = f'<div class="why"><b>Why is it moving?</b> <span class="pill label" style="margin-left:4px">{label}</span>'
+    h += f'<div class="sub">{" | ".join(nums)}</div><div>{summary}</div>'
+    if show_news:
+        if news:
+            for x in news:
+                tag = f'<i class="tg">{x["tag"]}</i> ' if x["tag"] else ""
+                url = _html.escape(x["link"], quote=True)
+                h += (f'<div class="nw">{tag}<a href="{url}" target="_blank" rel="noopener noreferrer">{_html.escape(x["title"][:110])}</a>'
+                      f' <span class="sub">{_html.escape(x["source"])}, {ago(x["age_h"])}</span></div>')
+        else:
+            h += '<div class="sub">No fresh news found. Move may be market or sector driven.</div>'
+    h += f'<div class="sub"><a href="{NSE_ANN}" target="_blank" rel="noopener noreferrer">NSE corporate announcements</a></div></div>'
+    return h
+
+
+def why_map(top, data, kind):
+    """Build the 'Why is it moving?' block for each card in `top` (a DataFrame of the cards shown).
+    News is only fetched for these top stocks. Returns {} if the switch is off or anything fails."""
+    if not show_why or not len(top):
+        return {}
+    try:
+        n = nifty_pct()
+        pmap = pct_change_map(data, kind)
+        syms = list(top.Symbol)
+        news = {}
+        try:
+            with ThreadPoolExecutor(max_workers=5) as ex:
+                futs = {s: ex.submit(get_news, s) for s in syms}
+                for s, f in futs.items():
+                    try:
+                        news[s] = f.result(timeout=8)
+                    except Exception:
+                        news[s] = []
+        except Exception:
+            news = {}
+        out = {}
+        for _, r in top.iterrows():
+            try:
+                sp, sec = sector_pct(r.Symbol, pmap)
+                out[r.Symbol] = why_html(r.Symbol, float(r["Chg %"]), n, sp, sec, news.get(r.Symbol, []))
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return {}
+
+
+def why_notes():
+    """Small warning note and the 'How the move reason works' box."""
+    if not show_why:
+        return
+    st.caption("News is fetched from free public sources and can be delayed or incomplete. Always check NSE/BSE announcements "
+               "and company results dates before taking a trade.")
+    with st.expander("ℹ️ How the move reason works", expanded=False):
+        st.markdown("""
+Each top card compares the stock's move today with the **Nifty 50** and with its **sector peers** (the middle move of other stocks in the same sector in this scan):
+- **Market-driven:** the stock moved within about 1 point of the Nifty.
+- **Sector-driven:** its sector peers moved clearly the same way (1 point or more) and the stock is not far ahead of them.
+- **Stock-specific:** the stock beat the Nifty by 2 points or more and also beat its sector by at least 1 point.
+- **Mixed signals:** none of the above fits.
+
+For the top stocks only, the latest headlines from the last 48 hours are read from Google News (then Yahoo Finance). Each headline gets a simple keyword tag, like Results or Order win. The one-line summary only says a **possible reason**, never a fact. Turn this off with the sidebar switch if the app feels slow.
+""")
+
+
 # ---- BTST journal (separate from the intraday journal, saved in its own file)
 def btst_norm(df):
     for c_ in BTST_COLS:
@@ -949,6 +1269,7 @@ Only large liquid stocks above Rs 100 are scanned. Stocks with results due today
                 top, ref_only = df.head(3), True
                 st.markdown('<div class="warn">No good BTST setup today. Skipping is also a good trade.<br>'
                             'Top 3 shown for reference only.</div>', unsafe_allow_html=True)
+            why = why_map(top, ddata, "daily")
             cols = st.columns(3)
             for idx, (_, r) in enumerate(top.iterrows()):
                 chips = "".join(f"<span>{nm} {v:.0f}/{mx}</span>" for nm, v, mx in
@@ -961,7 +1282,7 @@ Only large liquid stocks above Rs 100 are scanned. Stocks with results due today
                 <div>Entry<b>{r.Buy:.2f}</b></div><div>Stop<b>{r.Stop:.2f}</b></div><div>Target<b>{r.Target:.2f}</b></div></div>
                 <div class="sub">Shares for Rs {brisk_amt:,} risk: <b>{int(r.Qty)}</b> (risk Rs {r["Risk/sh"]:.2f} per share, reward 2x)<br>
                 Sell in the first 30 to 60 minutes tomorrow, or at the stop.</div>
-                <div class="chips">{chips}</div></div>"""
+                <div class="chips">{chips}</div>{why.get(r.Symbol, "")}</div>"""
                 with cols[idx % 3]:
                     st.markdown(html, unsafe_allow_html=True)
                     if st.button("Paper trade this BTST", key=f"bt_{r.Symbol}_{idx}"):
@@ -974,6 +1295,7 @@ Only large liquid stocks above Rs 100 are scanned. Stocks with results due today
                             btst_add(r.to_dict())
                             st.success("Saved. See the BTST paper trades tab.")
             st.caption("Score is for ranking only. It is not a chance of winning. A gap down overnight can skip right past your stop.")
+            why_notes()
             with st.expander("All scores"):
                 show = ["Symbol", "Score", "Label", "Close", "Chg %", "VolX", "Range %", "Breakout",
                         "Close pts", "Volume pts", "Break pts", "Trend pts", "Mood pts"]
